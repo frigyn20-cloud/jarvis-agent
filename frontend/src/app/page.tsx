@@ -4,6 +4,8 @@ import { useState, useRef, useEffect } from 'react';
 import ChatWindow from '@/components/ChatWindow';
 import styles from './page.module.css';
 
+const BACKEND = 'http://localhost:8000';
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -29,7 +31,7 @@ export default function Home() {
 
   // Check backend health on load
   useEffect(() => {
-    fetch('/api/health')
+    fetch(`${BACKEND}/health`)
       .then(r => r.ok ? setBackendStatus('ok') : setBackendStatus('offline'))
       .catch(() => setBackendStatus('offline'));
   }, []);
@@ -49,11 +51,10 @@ export default function Home() {
     setInput('');
     setLoading(true);
 
-    // Build history for API
     const history = messages.map(m => ({ role: m.role, content: m.content }));
 
     try {
-      const res = await fetch('/api/chat', {
+      const res = await fetch(`${BACKEND}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, history }),
@@ -78,7 +79,7 @@ export default function Home() {
         {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
-          content: 'Sorry, I could not connect to the backend. Make sure it is running on port 8000.',
+          content: 'Connection error. Make sure the backend is running: python -m uvicorn main:app --reload --port 8000',
           timestamp: new Date(),
         },
       ]);
@@ -113,7 +114,6 @@ export default function Home() {
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {/* SVG logo */}
           <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-label="Jarvis">
             <circle cx="14" cy="14" r="12" stroke="var(--primary)" strokeWidth="2" />
             <circle cx="14" cy="14" r="5" fill="var(--primary)" opacity="0.9" />
@@ -126,7 +126,6 @@ export default function Home() {
           <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 4 }}>AI Agent</span>
         </div>
 
-        {/* Backend status badge */}
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -147,10 +146,8 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Chat window */}
       <ChatWindow messages={messages} loading={loading} />
 
-      {/* Input area */}
       <div style={{
         padding: '12px 16px 16px',
         borderTop: '1px solid var(--border)',

@@ -10,10 +10,15 @@ load_dotenv()
 
 app = FastAPI(title="Jarvis Agent API")
 
-# CORS — allow your Next.js frontend
+# CORS — allow all localhost origins for local development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:3000")],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -22,7 +27,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
-    history: list[dict] = []  # [{"role": "user"|"assistant", "content": "..."}]
+    history: list[dict] = []
 
 
 class MemoryRequest(BaseModel):
@@ -30,29 +35,19 @@ class MemoryRequest(BaseModel):
     value: str
 
 
-# ─── Health check ────────────────────────────────────────────────────────────
-
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": os.getenv("OLLAMA_MODEL", "llama3")}
+    return {"status": "ok", "model": os.getenv("GROQ_MODEL", "llama3-70b-8192")}
 
-
-# ─── Main chat endpoint ───────────────────────────────────────────────────────
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    """
-    Send a message to Jarvis. The agent decides whether to answer
-    directly or use a tool (calculator, summarizer, memory, etc.).
-    """
     try:
         result = await run_agent(req.message, req.history)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# ─── Memory endpoints ─────────────────────────────────────────────────────────
 
 @app.get("/memory")
 async def list_memory():
