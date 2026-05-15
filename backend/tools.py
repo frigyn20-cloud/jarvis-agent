@@ -7,35 +7,23 @@ from memory import save_memory, search_memory
 
 
 def _do_search(query: str) -> str:
-    """Try multiple backends to get search results."""
-    # Try langchain community wrapper first
+    """Search using ddgs (formerly duckduckgo-search)."""
     try:
-        from langchain_community.tools import DuckDuckGoSearchRun
-        search = DuckDuckGoSearchRun()
-        result = search.run(query)
-        if result and len(result) > 20:
-            return result
-    except Exception:
-        pass
-
-    # Fallback: raw DDGS with lite backend
-    try:
-        from duckduckgo_search import DDGS
-        time.sleep(1)  # avoid rate limiting
+        from ddgs import DDGS
         with DDGS() as ddgs:
-            results = ddgs.text(query, max_results=5, backend="lite")
+            results = list(ddgs.text(query, max_results=5))
             if results:
                 parts = [f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results]
                 return "\n\n".join(parts)
     except Exception:
         pass
 
-    # Second fallback: html backend
+    # Fallback with delay
     try:
-        from duckduckgo_search import DDGS
-        time.sleep(2)
+        from ddgs import DDGS
+        time.sleep(1.5)
         with DDGS() as ddgs:
-            results = ddgs.text(query, max_results=5, backend="html")
+            results = list(ddgs.text(query, max_results=5, backend="lite"))
             if results:
                 parts = [f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results]
                 return "\n\n".join(parts)

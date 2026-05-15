@@ -6,4 +6,4 @@ langchain-core
 langchain-community
 langgraph
 numexpr
-duckduckgo-search
+ddgs
