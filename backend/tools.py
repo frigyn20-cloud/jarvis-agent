@@ -4,6 +4,12 @@ import webbrowser
 from langchain_core.tools import tool
 from memory import save_memory, search_memory
 
+try:
+    from duckduckgo_search import DDGS
+    _DDGS_AVAILABLE = True
+except ImportError:
+    _DDGS_AVAILABLE = False
+
 
 @tool
 def calculator(expression: str) -> str:
@@ -28,13 +34,34 @@ def get_time(_: str = "") -> str:
 
 
 @tool
+def web_search(query: str) -> str:
+    """
+    Search the internet for current, real-time information.
+    Use this for news, weather, prices, sports scores, recent events,
+    facts you are unsure about, or anything that may have changed recently.
+    Input: a search query string.
+    Returns: top results with titles, URLs, and snippets.
+    """
+    if not _DDGS_AVAILABLE:
+        return "Web search unavailable. Run: pip install duckduckgo-search"
+    try:
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=5):
+                results.append(f"**{r['title']}**\n{r['href']}\n{r['body']}")
+        if not results:
+            return "No results found."
+        return "\n\n".join(results)
+    except Exception as e:
+        return f"Search error: {e}"
+
+
+@tool
 def summarize_text(text: str) -> str:
     """
     Summarize a block of text. Pass the full text as input.
     Returns a concise summary.
     """
-    # The LLM itself handles summarization — this tool signals intent to the agent
-    # and returns the text so the LLM node can produce the summary
     if len(text.strip()) < 30:
         return "Text is too short to summarize."
     return f"[SUMMARIZE THIS TEXT]\n{text}"
@@ -88,4 +115,4 @@ def open_url(url: str) -> str:
 CONFIRM_REQUIRED_TOOLS = {"open_url"}
 
 # All available tools list
-ALL_TOOLS = [calculator, get_time, summarize_text, remember, recall, open_url]
+ALL_TOOLS = [calculator, get_time, web_search, summarize_text, remember, recall, open_url]

@@ -11,13 +11,13 @@ from tools import ALL_TOOLS, CONFIRM_REQUIRED_TOOLS
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-# System prompt — Jarvis personality
 SYSTEM_PROMPT = """
 You are Jarvis, a smart and helpful personal AI assistant. You are concise, friendly, and practical.
 
 You have access to these tools:
+- web_search: search the internet for real-time info, news, weather, prices, sports, recent events
 - calculator: do math
 - get_time: check current date/time
 - summarize_text: summarize pasted text
@@ -26,24 +26,22 @@ You have access to these tools:
 - open_url: open a website in the browser
 
 Rules:
+- Use web_search whenever the user asks about current events, news, weather, prices, sports scores, or anything time-sensitive.
+- Use web_search when you are unsure if your knowledge is up to date.
 - Use tools when they help. Do not use them for simple conversational answers.
 - For math, always use the calculator tool.
 - For memory questions, use recall first.
-- Never make up facts. If you don't know, say so.
-- Keep answers short and clear.
+- Never make up facts. If you don't know, say so or search for it.
+- Keep answers short and clear. Summarize web results in plain language.
 - When using open_url, always confirm with the user before calling it.
 """
 
-
-# ─── State definition ─────────────────────────────────────────────────────────
 
 class AgentState(TypedDict):
     messages: Annotated[list, operator.add]
     tool_calls_made: list[str]
     pending_confirmation: dict | None
 
-
-# ─── Build the LLM ────────────────────────────────────────────────────────────
 
 def get_llm_with_tools():
     if not GROQ_API_KEY:
@@ -58,8 +56,6 @@ def get_llm_with_tools():
     )
     return llm.bind_tools(ALL_TOOLS)
 
-
-# ─── Graph nodes ──────────────────────────────────────────────────────────────
 
 def agent_node(state: AgentState):
     llm = get_llm_with_tools()
@@ -99,8 +95,6 @@ def confirmation_node(state: AgentState):
     return state
 
 
-# ─── Build the graph ──────────────────────────────────────────────────────────
-
 def build_graph():
     tool_node = ToolNode(ALL_TOOLS)
     graph = StateGraph(AgentState)
@@ -124,8 +118,6 @@ def build_graph():
 
 APP_GRAPH = build_graph()
 
-
-# ─── Main entry point ─────────────────────────────────────────────────────────
 
 async def run_agent(message: str, history: list[dict]) -> dict:
     lc_messages = []
