@@ -1,13 +1,33 @@
 import numexpr
 import datetime
 import webbrowser
-import time
 from langchain_core.tools import tool
 from memory import save_memory, search_memory
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 
 def _do_search(query: str) -> str:
-    """Search using ddgs (formerly duckduckgo-search)."""
+    """Search using Tavily (primary) with DuckDuckGo fallback."""
+    tavily_key = os.getenv("TAVILY_API_KEY", "")
+
+    # Primary: Tavily
+    if tavily_key:
+        try:
+            from tavily import TavilyClient
+            client = TavilyClient(api_key=tavily_key)
+            response = client.search(query, max_results=5)
+            results = response.get("results", [])
+            if results:
+                parts = []
+                for r in results:
+                    parts.append(f"**{r['title']}**\n{r['url']}\n{r['content']}")
+                return "\n\n".join(parts)
+        except Exception as e:
+            pass  # fall through to backup
+
+    # Fallback: ddgs
     try:
         from ddgs import DDGS
         with DDGS() as ddgs:
@@ -15,20 +35,8 @@ def _do_search(query: str) -> str:
             if results:
                 parts = [f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results]
                 return "\n\n".join(parts)
-    except Exception:
-        pass
-
-    # Fallback with delay
-    try:
-        from ddgs import DDGS
-        time.sleep(1.5)
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5, backend="lite"))
-            if results:
-                parts = [f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results]
-                return "\n\n".join(parts)
     except Exception as e:
-        return f"Search unavailable right now: {e}"
+        return f"Search unavailable: {e}"
 
     return "No results found."
 
@@ -60,11 +68,11 @@ def web_search(query: str) -> str:
     """
     Search the internet for any information — current events, news, weather,
     stock prices, sports scores, facts, people, places, products, how-to guides,
-    recent developments, or anything else.
-    Use this tool whenever you are not 100% certain of an answer, or when the
-    user asks about anything that may have changed or happened recently.
+    science, history, definitions, recipes, or absolutely anything else.
+    Use this tool whenever the user asks a factual question or anything
+    you are not 100% certain about.
     Input: a plain search query string.
-    Returns: top search results with titles, links, and descriptions.
+    Returns: top search results with titles, links, and content.
     """
     return _do_search(query)
 
