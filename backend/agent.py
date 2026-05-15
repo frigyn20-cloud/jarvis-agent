@@ -11,7 +11,7 @@ from tools import ALL_TOOLS, CONFIRM_REQUIRED_TOOLS
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 SYSTEM_PROMPT = """
 You are Jarvis, a smart and helpful personal AI assistant. You are concise, friendly, and practical.
@@ -45,25 +45,36 @@ class AgentState(TypedDict):
     pending_confirmation: dict | None
 
 
-def get_llm_with_tools():
+def get_llm():
     if not GROQ_API_KEY:
         raise ValueError(
             "GROQ_API_KEY is not set. "
             "Get a free key at https://console.groq.com and add it to backend/.env"
         )
-    llm = ChatGroq(
+    return ChatGroq(
         api_key=GROQ_API_KEY,
         model=GROQ_MODEL,
         temperature=0.2,
     )
-    return llm.bind_tools(ALL_TOOLS)
 
 
 def agent_node(state: AgentState):
-    llm = get_llm_with_tools()
+    llm = get_llm().bind_tools(ALL_TOOLS)
     system_msg = SystemMessage(content=SYSTEM_PROMPT)
     messages = [system_msg] + state["messages"]
-    response = llm.invoke(messages)
+    try:
+        response = llm.invoke(messages)
+    except Exception as e:
+        err = str(e)
+        # Tool call formatting failed — retry without tools so we still get an answer
+        if "tool_use_failed" in err or "failed_generation" in err:
+            fallback_llm = get_llm()
+            fallback_prompt = SystemMessage(
+                content=SYSTEM_PROMPT + "\n\nNOTE: Tool calling is unavailable right now. Answer as best you can from your training knowledge."
+            )
+            response = fallback_llm.invoke([fallback_prompt] + state["messages"])
+        else:
+            raise
     return {
         "messages": [response],
         "tool_calls_made": state.get("tool_calls_made", []),
