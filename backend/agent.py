@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from langchain_ollama import ChatOllama
+from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -10,10 +10,10 @@ from tools import ALL_TOOLS, CONFIRM_REQUIRED_TOOLS
 
 load_dotenv()
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 
-# System prompt that gives the agent its Jarvis personality
+# System prompt — Jarvis personality
 SYSTEM_PROMPT = """
 You are Jarvis, a smart and helpful personal AI assistant. You are concise, friendly, and practical.
 
@@ -40,15 +40,20 @@ Rules:
 class AgentState(TypedDict):
     messages: Annotated[list, operator.add]
     tool_calls_made: list[str]
-    pending_confirmation: dict | None  # tool call waiting for user approval
+    pending_confirmation: dict | None
 
 
-# ─── Build the LLM with tools ─────────────────────────────────────────────────
+# ─── Build the LLM ────────────────────────────────────────────────────────────
 
 def get_llm_with_tools():
-    llm = ChatOllama(
-        model=OLLAMA_MODEL,
-        base_url=OLLAMA_BASE_URL,
+    if not GROQ_API_KEY:
+        raise ValueError(
+            "GROQ_API_KEY is not set. "
+            "Get a free key at https://console.groq.com and add it to backend/.env"
+        )
+    llm = ChatGroq(
+        api_key=GROQ_API_KEY,
+        model=GROQ_MODEL,
         temperature=0.2,
     )
     return llm.bind_tools(ALL_TOOLS)
@@ -57,7 +62,6 @@ def get_llm_with_tools():
 # ─── Graph nodes ──────────────────────────────────────────────────────────────
 
 def agent_node(state: AgentState):
-    """The main LLM reasoning node."""
     llm = get_llm_with_tools()
     system_msg = SystemMessage(content=SYSTEM_PROMPT)
     messages = [system_msg] + state["messages"]
@@ -70,10 +74,8 @@ def agent_node(state: AgentState):
 
 
 def should_continue(state: AgentState):
-    """Decide whether to call tools or end."""
     last_message = state["messages"][-1]
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        # Check if any tool needs confirmation
         for tc in last_message.tool_calls:
             if tc["name"] in CONFIRM_REQUIRED_TOOLS:
                 return "needs_confirmation"
@@ -82,7 +84,6 @@ def should_continue(state: AgentState):
 
 
 def confirmation_node(state: AgentState):
-    """Flag tools that need user confirmation."""
     last_message = state["messages"][-1]
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         confirm_tools = [
@@ -102,12 +103,10 @@ def confirmation_node(state: AgentState):
 
 def build_graph():
     tool_node = ToolNode(ALL_TOOLS)
-
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
     graph.add_node("needs_confirmation", confirmation_node)
-
     graph.set_entry_point("agent")
     graph.add_conditional_edges(
         "agent",
@@ -120,7 +119,6 @@ def build_graph():
     )
     graph.add_edge("tools", "agent")
     graph.add_edge("needs_confirmation", END)
-
     return graph.compile()
 
 
@@ -130,13 +128,8 @@ APP_GRAPH = build_graph()
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
 async def run_agent(message: str, history: list[dict]) -> dict:
-    """
-    Run the agent with a user message and conversation history.
-    Returns: { reply, tool_calls, pending_confirmation }
-    """
-    # Convert history to LangChain messages
     lc_messages = []
-    for msg in history[-10:]:  # Keep last 10 turns for context
+    for msg in history[-10:]:
         if msg["role"] == "user":
             lc_messages.append(HumanMessage(content=msg["content"]))
         elif msg["role"] == "assistant":
@@ -152,7 +145,6 @@ async def run_agent(message: str, history: list[dict]) -> dict:
 
     result = await APP_GRAPH.ainvoke(initial_state)
 
-    # Extract the final reply
     final_messages = result["messages"]
     last_ai_message = None
     for msg in reversed(final_messages):
@@ -162,7 +154,6 @@ async def run_agent(message: str, history: list[dict]) -> dict:
 
     reply = last_ai_message.content if last_ai_message else "Sorry, I could not generate a response."
 
-    # Collect tool calls for display
     tool_calls_log = []
     for msg in final_messages:
         if hasattr(msg, "tool_calls") and msg.tool_calls:

@@ -4,7 +4,7 @@ python-dotenv==1.0.1
 httpx==0.27.2
 langchain==0.3.7
 langchain-community==0.3.7
-langchain-ollama==0.2.1
+langchain-groq==0.2.2
 langgraph==0.2.48
 sqlite-utils==3.37
 numexpr==2.10.1

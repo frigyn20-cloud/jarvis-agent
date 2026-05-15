@@ -1,13 +1,15 @@
 # 🤖 Jarvis Agent
 
-A free, local-first AI personal assistant inspired by Jarvis. Built with:
+A free, local-first AI personal assistant inspired by Jarvis.
 
-- **Brain**: [Ollama](https://ollama.com) — run local LLMs for free
+> **No Ollama or local GPU needed.** Uses the **Groq free API** — fastest free LLM inference available.
+
+**Stack:**
+- **Brain**: [Groq](https://console.groq.com) — free cloud LLM API, runs Llama 3 70B for free
 - **Agent Logic**: [LangGraph](https://github.com/langchain-ai/langgraph) — stateful, tool-using agent
 - **Backend**: Python FastAPI
 - **Frontend**: Next.js + TypeScript chat UI
-- **Voice (optional)**: Whisper STT + XTTS-v2 TTS
-- **Memory**: SQLite
+- **Memory**: SQLite (saved on your computer)
 
 ---
 
@@ -15,53 +17,45 @@ A free, local-first AI personal assistant inspired by Jarvis. Built with:
 
 ```
 jarvis-agent/
-├── backend/          ← Python FastAPI + LangGraph agent
-│   ├── main.py
-│   ├── agent.py
-│   ├── tools.py
-│   ├── memory.py
+├── backend/
+│   ├── main.py          ← FastAPI server
+│   ├── agent.py         ← LangGraph agent (uses Groq)
+│   ├── tools.py         ← calculator, timer, summarizer, memory, open_url
+│   ├── memory.py        ← SQLite long-term memory
 │   ├── requirements.txt
-│   └── .env.example
-├── frontend/         ← Next.js TypeScript chat UI
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── page.tsx
-│   │   │   ├── layout.tsx
-│   │   │   └── globals.css
-│   │   └── components/
-│   │       ├── ChatWindow.tsx
-│   │       ├── MessageBubble.tsx
-│   │       └── ToolBadge.tsx
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── next.config.ts
-└── README.md
+│   └── .env.example     ← copy this to .env and add your Groq key
+└── frontend/
+    └── src/
+        ├── app/page.tsx        ← main chat UI
+        └── components/
+            ├── ChatWindow.tsx
+            ├── MessageBubble.tsx
+            └── ToolBadge.tsx
 ```
 
 ---
 
 ## 🚀 Quick Start
 
-### Step 1 — Install Ollama
+### Step 1 — Get a FREE Groq API Key
 
-1. Go to [https://ollama.com](https://ollama.com) and download Ollama for your OS.
-2. Open Terminal and pull a model:
-
-```bash
-ollama pull llama3
-```
-
-3. Start Ollama:
-
-```bash
-ollama serve
-```
-
-Ollama will run at `http://localhost:11434`.
+1. Go to **[console.groq.com](https://console.groq.com)**
+2. Sign up (free, no credit card needed)
+3. Click **API Keys** → **Create API Key**
+4. Copy the key — it starts with `gsk_...`
 
 ---
 
-### Step 2 — Set up the Backend
+### Step 2 — Clone the repo
+
+```bash
+git clone https://github.com/frigyn20-cloud/jarvis-agent.git
+cd jarvis-agent
+```
+
+---
+
+### Step 3 — Set up the Backend
 
 ```bash
 cd backend
@@ -73,19 +67,37 @@ venv\Scripts\activate
 source venv/bin/activate
 
 pip install -r requirements.txt
+```
 
-# Copy environment file
+Now create your `.env` file:
+
+```bash
+# Windows:
+copy .env.example .env
+
+# Mac/Linux:
 cp .env.example .env
+```
 
-# Start backend
+Open `backend/.env` in any text editor and replace `your_groq_api_key_here` with your real key:
+
+```
+GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxx
+```
+
+Start the backend:
+
+```bash
 uvicorn main:app --reload --port 8000
 ```
 
-Backend will run at `http://localhost:8000`.
+You should see: `Uvicorn running on http://0.0.0.0:8000`
 
 ---
 
-### Step 3 — Set up the Frontend
+### Step 4 — Set up the Frontend
+
+Open a **second terminal window**:
 
 ```bash
 cd frontend
@@ -93,49 +105,48 @@ npm install
 npm run dev
 ```
 
-Frontend will open at `http://localhost:3000`.
+Open **[http://localhost:3000](http://localhost:3000)** — Jarvis is running! 🎉
 
 ---
 
 ## 🛠 Built-in Tools
 
-| Tool | What it does |
+| Tool | What Jarvis can do |
 |---|---|
-| `calculator` | Evaluate math expressions |
-| `summarizer` | Summarize any text you paste |
-| `remember` | Save a fact to long-term memory |
-| `recall` | Search your saved memory |
-| `open_url` | Open a URL in the default browser |
-| `get_time` | Return current date and time |
+| 🧮 `calculator` | Math: `"what is 1500 * 1.08?"` |
+| 🕐 `get_time` | `"What time is it?"` |
+| 📄 `summarize_text` | `"Summarize this: [paste text]"` |
+| 💾 `remember` | `"Remember: my project is OmniTool Studio"` |
+| 🔍 `recall` | `"What do you know about my project?"` |
+| 🌐 `open_url` | `"Open https://google.com"` (asks confirmation first) |
 
 ---
 
-## 🗣 Voice (Optional — Phase 2)
+## 🔑 Free Groq Models Available
 
-Coming next:
-- Whisper-style STT for speech input
-- XTTS-v2 for speech output
-- Push-to-talk button in the UI
+| Model | Best for |
+|---|---|
+| `llama3-70b-8192` | Best quality (default) |
+| `llama3-8b-8192` | Faster responses |
+| `mixtral-8x7b-32768` | Long documents / large context |
+
+Change the model anytime in `backend/.env` — no code changes needed.
 
 ---
 
 ## 🔒 Safety Rules
 
 - Read-only tools run automatically
-- Write/action tools ask for confirmation first
-- All tool calls are logged in the UI
-- Memory writes are always visible
+- `open_url` always asks for confirmation first
+- All tool calls are shown as badges in the chat UI
+- Memory is stored locally on your computer only
+- Your API key is never sent to the frontend
 
 ---
 
-## 📖 Tech Stack
+## 🗣 Voice (Coming Next)
 
-| Layer | Tech |
-|---|---|
-| Local LLM runner | Ollama |
-| Agent framework | LangGraph |
-| Backend | Python 3.11 + FastAPI |
-| Frontend | Next.js 14 + TypeScript |
-| Memory | SQLite |
-| Optional voice STT | Whisper (local) |
-| Optional voice TTS | XTTS-v2 (Coqui) |
+Phase 2 will add:
+- Push-to-talk button
+- Speech-to-text (Whisper)
+- Text-to-speech (XTTS-v2)
