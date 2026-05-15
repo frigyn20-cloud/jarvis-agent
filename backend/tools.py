@@ -1,14 +1,48 @@
 import numexpr
 import datetime
 import webbrowser
+import time
 from langchain_core.tools import tool
 from memory import save_memory, search_memory
 
-try:
-    from duckduckgo_search import DDGS
-    _DDGS_AVAILABLE = True
-except ImportError:
-    _DDGS_AVAILABLE = False
+
+def _do_search(query: str) -> str:
+    """Try multiple backends to get search results."""
+    # Try langchain community wrapper first
+    try:
+        from langchain_community.tools import DuckDuckGoSearchRun
+        search = DuckDuckGoSearchRun()
+        result = search.run(query)
+        if result and len(result) > 20:
+            return result
+    except Exception:
+        pass
+
+    # Fallback: raw DDGS with lite backend
+    try:
+        from duckduckgo_search import DDGS
+        time.sleep(1)  # avoid rate limiting
+        with DDGS() as ddgs:
+            results = ddgs.text(query, max_results=5, backend="lite")
+            if results:
+                parts = [f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results]
+                return "\n\n".join(parts)
+    except Exception:
+        pass
+
+    # Second fallback: html backend
+    try:
+        from duckduckgo_search import DDGS
+        time.sleep(2)
+        with DDGS() as ddgs:
+            results = ddgs.text(query, max_results=5, backend="html")
+            if results:
+                parts = [f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results]
+                return "\n\n".join(parts)
+    except Exception as e:
+        return f"Search unavailable right now: {e}"
+
+    return "No results found."
 
 
 @tool
@@ -36,24 +70,15 @@ def get_time(_: str = "") -> str:
 @tool
 def web_search(query: str) -> str:
     """
-    Search the internet for current, real-time information.
-    Use this for news, weather, prices, sports scores, recent events,
-    facts you are unsure about, or anything that may have changed recently.
-    Input: a search query string.
-    Returns: top results with titles, URLs, and snippets.
+    Search the internet for any information — current events, news, weather,
+    stock prices, sports scores, facts, people, places, products, how-to guides,
+    recent developments, or anything else.
+    Use this tool whenever you are not 100% certain of an answer, or when the
+    user asks about anything that may have changed or happened recently.
+    Input: a plain search query string.
+    Returns: top search results with titles, links, and descriptions.
     """
-    if not _DDGS_AVAILABLE:
-        return "Web search unavailable. Run: pip install duckduckgo-search"
-    try:
-        results = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=5):
-                results.append(f"**{r['title']}**\n{r['href']}\n{r['body']}")
-        if not results:
-            return "No results found."
-        return "\n\n".join(results)
-    except Exception as e:
-        return f"Search error: {e}"
+    return _do_search(query)
 
 
 @tool
@@ -114,5 +139,5 @@ def open_url(url: str) -> str:
 # Tools that require user confirmation before running
 CONFIRM_REQUIRED_TOOLS = {"open_url"}
 
-# All available tools list
+# All available tools
 ALL_TOOLS = [calculator, get_time, web_search, summarize_text, remember, recall, open_url]

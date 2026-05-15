@@ -3,6 +3,7 @@ uvicorn[standard]
 python-dotenv
 langchain-groq
 langchain-core
+langchain-community
 langgraph
 numexpr
 duckduckgo-search
