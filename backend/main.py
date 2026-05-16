@@ -1,8 +1,10 @@
 import os
+import base64
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
+from typing import Optional
 from dotenv import load_dotenv
 from agent import run_agent
 from trading_state import get_session, reset_session, TradingSessionState
@@ -24,6 +26,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []
+    image_base64: Optional[str] = None  # base64-encoded PNG/JPEG from screen capture
 
 
 class TTSRequest(BaseModel):
@@ -37,11 +40,11 @@ def health():
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    result = await run_agent(req.message, req.history)
+    result = await run_agent(req.message, req.history, image_base64=req.image_base64)
     return result
 
 
-# ─── Voice endpoints ──────────────────────────────────────────────────────────
+# ─── Voice endpoints ───────────────────────────────────────────────────────────────
 
 @app.post("/voice/tts")
 async def tts(req: TTSRequest):
@@ -57,7 +60,7 @@ async def stt(audio: UploadFile = File(...)):
     return {"text": text}
 
 
-# ─── Session State endpoints ──────────────────────────────────────────────────
+# ─── Session State endpoints ────────────────────────────────────────────────────────
 
 @app.get("/session", response_model=TradingSessionState)
 def get_session_state():

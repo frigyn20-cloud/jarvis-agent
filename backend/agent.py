@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
-from typing import TypedDict, Annotated
+from typing import TypedDict, Annotated, Optional
 import operator
 from tools import ALL_TOOLS, CONFIRM_REQUIRED_TOOLS
 from trading_state import get_session
@@ -18,8 +18,6 @@ GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 CLAUDE_MODEL      = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
 # ─── Claude triggers ───────────────────────────────────────────────────────────────────────────────
-# Any message matching these goes to Claude (which has Tavily web search).
-# Groq is fast but offline — it cannot look up live prices, news, or research.
 CLAUDE_TRIGGERS = [
     # ─ Futures & instruments ─────────────────────────────────────────────────────
     "mnq", "mes", "nq futures", "es futures",
@@ -63,7 +61,7 @@ CLAUDE_TRIGGERS = [
     "bias", "bullish bias", "bearish bias",
     "1h", "4h", "15m", "5m", "1m", "3m",
     "timeframe", "htf", "ltf",
-    # ─ Live data / news / research (Groq can't answer these) ──────────────
+    # ─ Live data / news / research ───────────────────────────────────────────
     "news", "latest", "today", "right now", "current", "live",
     "what happened", "what's happening", "what is happening",
     "breaking", "update", "updates", "headline", "headlines",
@@ -78,6 +76,10 @@ CLAUDE_TRIGGERS = [
     "search", "look up", "find out", "tell me about",
     "what is", "who is", "where is", "when is", "how much",
     "weather", "forecast",
+    # ─ Vision / screen capture ────────────────────────────────────────────────
+    "look at my screen", "what do you see", "analyze my chart",
+    "check the chart", "what's on my screen", "read the chart",
+    "look at this", "can you see", "chart analysis",
 ]
 
 # ─── System prompts ────────────────────────────────────────────────────────────────────
@@ -130,6 +132,10 @@ PERSONALITY & TONE:
 
 Tools available: web_search, calculator, get_time, summarize_text, remember, recall, open_url.
 
+VISION: When an image is provided, it is a screenshot of the user's screen — likely a TradingView chart.
+Analyze it using the ICT model below. Walk through what you see: structure, FVGs, iFVGs, bias.
+Speak as if describing the chart aloud to the user. Be specific about price levels if visible.
+
 {ICT_STRATEGY}
 
 GENERAL RULES:
@@ -149,7 +155,9 @@ Do NOT bring up trading, markets, or financial topics unless the user asks.
 """
 
 
-def needs_claude(message: str) -> bool:
+def needs_claude(message: str, has_image: bool = False) -> bool:
+    if has_image:
+        return True  # always use Claude for vision
     msg_lower = message.lower()
     return any(trigger in msg_lower for trigger in CLAUDE_TRIGGERS)
 
@@ -173,6 +181,23 @@ def get_groq_llm():
     return ChatGroq(api_key=GROQ_API_KEY, model=GROQ_MODEL, temperature=0.3)
 
 
+def build_human_message(text: str, image_base64: Optional[str] = None) -> HumanMessage:
+    """Build a HumanMessage, optionally with an image for Claude vision."""
+    if not image_base64:
+        return HumanMessage(content=text)
+    return HumanMessage(content=[
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": image_base64,
+            },
+        },
+        {"type": "text", "text": text},
+    ])
+
+
 class AgentState(TypedDict):
     messages: Annotated[list, operator.add]
     tool_calls_made: list[str]
@@ -184,9 +209,16 @@ class AgentState(TypedDict):
 def agent_node(state: AgentState):
     messages_in = state["messages"]
     last_human = next(
-        (m.content for m in reversed(messages_in) if isinstance(m, HumanMessage)), ""
+        (m.content if isinstance(m.content, str) else m.content[-1].get("text", "")
+         for m in reversed(messages_in) if isinstance(m, HumanMessage)), ""
     )
-    use_claude = needs_claude(last_human)
+    # Check if last message has an image
+    has_image = False
+    last_msg = next((m for m in reversed(messages_in) if isinstance(m, HumanMessage)), None)
+    if last_msg and isinstance(last_msg.content, list):
+        has_image = any(c.get("type") == "image" for c in last_msg.content if isinstance(c, dict))
+
+    use_claude = needs_claude(last_human, has_image)
     routed_to = "groq"
     used_fallback = False
     response = None
@@ -204,7 +236,7 @@ def agent_node(state: AgentState):
             llm = get_claude_llm().bind_tools(ALL_TOOLS)
             response = llm.invoke([system] + messages_in)
             routed_to = "claude"
-            logger.info(f"[Alpha] CLAUDE -> {CLAUDE_MODEL} | {last_human[:60]}")
+            logger.info(f"[Alpha] CLAUDE -> {CLAUDE_MODEL} | vision={has_image} | {last_human[:60]}")
         except Exception as e:
             logger.warning(f"[Alpha] Claude failed: {e} - falling back to Groq")
             used_fallback = True
@@ -214,7 +246,15 @@ def agent_node(state: AgentState):
         try:
             system = SystemMessage(content=CHAT_PROMPT)
             llm = get_groq_llm()
-            response = llm.invoke([system] + messages_in)
+            # Groq doesn't support vision — strip image, send text only
+            text_only_messages = []
+            for m in messages_in:
+                if isinstance(m, HumanMessage) and isinstance(m.content, list):
+                    text = " ".join(c.get("text", "") for c in m.content if isinstance(c, dict) and c.get("type") == "text")
+                    text_only_messages.append(HumanMessage(content=text))
+                else:
+                    text_only_messages.append(m)
+            response = llm.invoke([system] + text_only_messages)
             routed_to = "groq"
             logger.info(f"[Alpha] GROQ -> {GROQ_MODEL} | {last_human[:60]}")
         except Exception as e:
@@ -268,12 +308,14 @@ def build_graph():
 APP_GRAPH = build_graph()
 
 
-async def run_agent(message: str, history: list[dict]) -> dict:
+async def run_agent(message: str, history: list[dict], image_base64: Optional[str] = None) -> dict:
     lc_messages = []
     for msg in history[-10:]:
         if msg["role"] == "user":        lc_messages.append(HumanMessage(content=msg["content"]))
         elif msg["role"] == "assistant": lc_messages.append(AIMessage(content=msg["content"]))
-    lc_messages.append(HumanMessage(content=message))
+
+    # Attach image to the current message if provided
+    lc_messages.append(build_human_message(message, image_base64))
 
     result = await APP_GRAPH.ainvoke({
         "messages": lc_messages,

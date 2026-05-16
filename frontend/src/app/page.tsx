@@ -4,7 +4,19 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import ChatWindow from '@/components/ChatWindow';
 
 const BACKEND = 'http://localhost:8000';
-const TTS_PLAYBACK_RATE = 1.15; // Slightly faster than default — adjust to taste (1.0–1.5)
+const TTS_PLAYBACK_RATE = 1.15;
+
+// Phrases that trigger automatic screen capture
+const SCREEN_TRIGGERS = [
+  'look at my screen', 'what do you see', 'analyze my chart',
+  'check the chart', "what's on my screen", 'read the chart',
+  'look at this', 'can you see', 'chart analysis',
+];
+
+function isScreenRequest(text: string): boolean {
+  const lower = text.toLowerCase();
+  return SCREEN_TRIGGERS.some(t => lower.includes(t));
+}
 
 export interface Message {
   id: string;
@@ -14,6 +26,7 @@ export interface Message {
   pendingConfirmation?: { name: string; args: Record<string, unknown> } | null;
   timestamp: Date;
   model?: string;
+  hasImage?: boolean;
 }
 
 function AlphaOrb({ speaking, listening }: { speaking: boolean; listening: boolean }) {
@@ -125,7 +138,7 @@ function HudCorner({ pos }: { pos: 'tl' | 'tr' | 'bl' | 'br' }) {
   return <div style={s} />;
 }
 
-function ModelBadge({ model }: { model: string }) {
+function ModelBadge({ model, hasImage }: { model: string; hasImage?: boolean }) {
   const isClaude = model.includes('claude');
   return (
     <span style={{
@@ -143,12 +156,11 @@ function ModelBadge({ model }: { model: string }) {
         background: isClaude ? '#b87fff' : 'var(--primary)',
         display: 'inline-block',
       }} />
-      {isClaude ? 'CLAUDE SONNET' : 'GROQ FALLBACK'}
+      {isClaude ? `CLAUDE SONNET${hasImage ? ' · VISION' : ''}` : 'GROQ FALLBACK'}
     </span>
   );
 }
 
-// ─── Mic button ───────────────────────────────────────────────────────────────
 function MicButton({ listening, onClick, disabled }: { listening: boolean; onClick: () => void; disabled: boolean }) {
   return (
     <button
@@ -158,14 +170,11 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
       style={{
         background: listening ? 'rgba(80,220,120,0.15)' : 'rgba(0,210,200,0.08)',
         border: `1px solid ${listening ? 'rgba(80,220,120,0.5)' : 'var(--border)'}`,
-        borderRadius: 4,
-        padding: '6px 10px',
+        borderRadius: 4, padding: '6px 10px',
         cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        transition: 'all 150ms ease',
-        alignSelf: 'flex-end',
-        opacity: disabled ? 0.4 : 1,
-        position: 'relative',
+        transition: 'all 150ms ease', alignSelf: 'flex-end',
+        opacity: disabled ? 0.4 : 1, position: 'relative',
       }}
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={listening ? '#50dc78' : 'var(--primary)'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -178,35 +187,61 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
         <span style={{
           position: 'absolute', top: 3, right: 3,
           width: 5, height: 5, borderRadius: '50%',
-          background: '#50dc78',
-          animation: 'blink 0.8s ease-in-out infinite',
+          background: '#50dc78', animation: 'blink 0.8s ease-in-out infinite',
         }} />
       )}
     </button>
   );
 }
 
+// ─── Screen capture helper ──────────────────────────────────────────────────────────
+async function captureScreen(): Promise<string | null> {
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: 1920, height: 1080 },
+      audio: false,
+    });
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    await new Promise<void>(resolve => { video.onloadedmetadata = () => resolve(); });
+    await video.play();
+
+    const canvas = document.createElement('canvas');
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d')!.drawImage(video, 0, 0);
+
+    stream.getTracks().forEach(t => t.stop());
+
+    // Return base64 PNG without the data:image/png;base64, prefix
+    return canvas.toDataURL('image/png').split(',')[1];
+  } catch (e) {
+    console.error('Screen capture failed:', e);
+    return null;
+  }
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([
     {
-      id: '0',
-      role: 'assistant',
-      content: "ALPHA ONLINE. Trading assistant initialized for MNQ & MES futures. Ask me about market conditions, price levels, technicals, news, or trade setups.",
-      timestamp: new Date(),
-      model: 'claude-sonnet-4-6',
+      id: '0', role: 'assistant',
+      content: "ALPHA ONLINE. Trading assistant initialized for MNQ & MES futures. Ask me about market conditions, price levels, technicals, news, or trade setups. Say 'look at my screen' to share your chart.",
+      timestamp: new Date(), model: 'claude-sonnet-4-6',
     },
   ]);
   const [input, setInput]         = useState('');
   const [loading, setLoading]     = useState(false);
   const [speaking, setSpeaking]   = useState(false);
   const [listening, setListening] = useState(false);
+  const [capturing, setCapturing] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [activeModel, setActiveModel] = useState<string>('claude-sonnet-4-6');
+  const [activeModel, setActiveModel]   = useState<string>('claude-sonnet-4-6');
+  const [lastHadImage, setLastHadImage] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
-  const inputRef       = useRef<HTMLTextAreaElement>(null);
-  const mediaRecRef    = useRef<MediaRecorder | null>(null);
-  const audioChunks    = useRef<Blob[]>([]);
-  const currentAudio   = useRef<HTMLAudioElement | null>(null);
+  const inputRef     = useRef<HTMLTextAreaElement>(null);
+  const mediaRecRef  = useRef<MediaRecorder | null>(null);
+  const audioChunks  = useRef<Blob[]>([]);
+  const currentAudio = useRef<HTMLAudioElement | null>(null);
   const sendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
 
   useEffect(() => {
@@ -215,41 +250,54 @@ export default function Home() {
       .catch(() => setBackendStatus('offline'));
   }, []);
 
-  // ─── TTS: play Alpha's reply via ElevenLabs ────────────────────────────────
   const playTTS = useCallback(async (text: string) => {
     if (!voiceEnabled || !text.trim()) return;
     try {
-      if (currentAudio.current) {
-        currentAudio.current.pause();
-        currentAudio.current = null;
-      }
+      if (currentAudio.current) { currentAudio.current.pause(); currentAudio.current = null; }
       setSpeaking(true);
       const res = await fetch(`${BACKEND}/voice/tts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
       });
       if (!res.ok) throw new Error('TTS failed');
       const blob  = await res.blob();
       const url   = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      audio.playbackRate = TTS_PLAYBACK_RATE; // ← speed control
+      audio.playbackRate = TTS_PLAYBACK_RATE;
       currentAudio.current = audio;
       audio.onended = () => { setSpeaking(false); URL.revokeObjectURL(url); };
       audio.onerror = () => { setSpeaking(false); };
       await audio.play();
     } catch (e) {
-      console.error('TTS error:', e);
-      setSpeaking(false);
+      console.error('TTS error:', e); setSpeaking(false);
     }
   }, [voiceEnabled]);
 
-  // ─── Core send logic ──────────────────────────────────────────────────────
   const sendMessage = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim();
     if (!text || loading) return;
 
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', content: text, timestamp: new Date() };
+    let imageBase64: string | null = null;
+
+    // Auto-capture screen if user asked to look at it
+    if (isScreenRequest(text)) {
+      setCapturing(true);
+      imageBase64 = await captureScreen();
+      setCapturing(false);
+      if (!imageBase64) {
+        setMessages(prev => [...prev, {
+          id: Date.now().toString(), role: 'assistant',
+          content: 'I was unable to capture your screen, sir. Please allow screen sharing when prompted.',
+          timestamp: new Date(),
+        }]);
+        return;
+      }
+    }
+
+    const userMsg: Message = {
+      id: Date.now().toString(), role: 'user', content: text,
+      timestamp: new Date(), hasImage: !!imageBase64,
+    };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setLoading(true);
@@ -258,29 +306,25 @@ export default function Home() {
 
     try {
       const res = await fetch(`${BACKEND}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, history, image_base64: imageBase64 }),
       });
       if (!res.ok) throw new Error('Backend error');
       const data  = await res.json();
       const model = data.model || 'claude-sonnet-4-6';
       setActiveModel(model);
+      setLastHadImage(!!imageBase64);
       const reply = data.reply || 'No response.';
       setMessages(prev => [...prev, {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: reply,
-        toolCalls: data.tool_calls || [],
+        id: (Date.now() + 1).toString(), role: 'assistant',
+        content: reply, toolCalls: data.tool_calls || [],
         pendingConfirmation: data.pending_confirmation || null,
-        timestamp: new Date(),
-        model,
+        timestamp: new Date(), model,
       }]);
       await playTTS(reply);
     } catch {
       setMessages(prev => [...prev, {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
+        id: (Date.now() + 1).toString(), role: 'assistant',
         content: 'CONNECTION LOST. Ensure backend is running: python -m uvicorn main:app --reload --port 8000',
         timestamp: new Date(),
       }]);
@@ -292,51 +336,40 @@ export default function Home() {
 
   useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
 
-  // ─── STT: record → transcribe → AUTO-SEND ────────────────────────────────
   const toggleMic = useCallback(async () => {
-    if (listening) {
-      mediaRecRef.current?.stop();
-      return;
-    }
+    if (listening) { mediaRecRef.current?.stop(); return; }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioChunks.current = [];
       const rec = new MediaRecorder(stream, { mimeType: 'audio/webm' });
       mediaRecRef.current = rec;
-
       rec.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.current.push(e.data); };
-
       rec.onstop = async () => {
         setListening(false);
         stream.getTracks().forEach(t => t.stop());
         const audioBlob = new Blob(audioChunks.current, { type: 'audio/webm' });
         if (audioBlob.size < 1000) return;
-
         const formData = new FormData();
         formData.append('audio', audioBlob, 'recording.webm');
-
         try {
           const res  = await fetch(`${BACKEND}/voice/stt`, { method: 'POST', body: formData });
           const data = await res.json();
-          if (data.text && data.text.trim()) {
-            await sendMessageRef.current(data.text.trim());
-          }
-        } catch (e) {
-          console.error('STT error:', e);
-        }
+          if (data.text?.trim()) await sendMessageRef.current(data.text.trim());
+        } catch (e) { console.error('STT error:', e); }
       };
-
-      setListening(true);
-      rec.start();
+      setListening(true); rec.start();
     } catch (e) {
       console.error('Mic error:', e);
-      alert('Microphone access denied. Please allow mic access in your browser.');
+      alert('Microphone access denied.');
     }
   }, [listening]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   };
+
+  const statusLabel = capturing ? 'CAPTURING...' : listening ? 'LISTENING...' : speaking ? 'SPEAKING...' : loading ? 'PROCESSING...' : 'STANDBY';
+  const statusColor = capturing ? '#ffd700' : listening ? '#50dc78' : speaking ? 'var(--accent)' : 'var(--primary)';
 
   return (
     <div style={{
@@ -347,13 +380,10 @@ export default function Home() {
     }}>
       <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 99, background: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px)' }} />
 
-      {/* Header */}
       <header style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '10px 20px',
-        borderBottom: '1px solid var(--border)',
-        background: 'rgba(7,21,24,0.95)',
-        backdropFilter: 'blur(12px)',
+        padding: '10px 20px', borderBottom: '1px solid var(--border)',
+        background: 'rgba(7,21,24,0.95)', backdropFilter: 'blur(12px)',
         flexShrink: 0, position: 'relative', zIndex: 10,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -369,14 +399,10 @@ export default function Home() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <ModelBadge model={activeModel} />
+          <ModelBadge model={activeModel} hasImage={lastHadImage} />
 
-          {/* Voice toggle */}
           <button
-            onClick={() => {
-              setVoiceEnabled(v => !v);
-              if (speaking && currentAudio.current) { currentAudio.current.pause(); setSpeaking(false); }
-            }}
+            onClick={() => { setVoiceEnabled(v => !v); if (speaking && currentAudio.current) { currentAudio.current.pause(); setSpeaking(false); } }}
             title={voiceEnabled ? 'Disable voice' : 'Enable voice'}
             style={{
               background: voiceEnabled ? 'rgba(0,210,200,0.08)' : 'rgba(255,68,102,0.08)',
@@ -396,7 +422,6 @@ export default function Home() {
             {voiceEnabled ? 'VOICE ON' : 'VOICE OFF'}
           </button>
 
-          {/* Ticker strip */}
           <div style={{ display: 'flex', gap: 16, fontFamily: 'Share Tech Mono, monospace', fontSize: 11 }}>
             {['MNQ', 'MES', 'VIX'].map(sym => (
               <span key={sym} style={{ color: 'var(--text-muted)' }}>
@@ -406,7 +431,6 @@ export default function Home() {
             ))}
           </div>
 
-          {/* Status */}
           <div style={{
             display: 'flex', alignItems: 'center', gap: 6,
             fontSize: 10, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
@@ -414,25 +438,17 @@ export default function Home() {
             background: 'var(--surface-2)', padding: '4px 10px', borderRadius: 4,
             border: `1px solid ${backendStatus === 'ok' ? 'rgba(0,229,160,0.2)' : backendStatus === 'offline' ? 'rgba(255,68,102,0.2)' : 'var(--border)'}`,
           }}>
-            <span style={{
-              width: 5, height: 5, borderRadius: '50%', display: 'inline-block',
-              background: backendStatus === 'ok' ? 'var(--green)' : backendStatus === 'offline' ? 'var(--red)' : '#555',
-            }} />
+            <span style={{ width: 5, height: 5, borderRadius: '50%', display: 'inline-block', background: backendStatus === 'ok' ? 'var(--green)' : backendStatus === 'offline' ? 'var(--red)' : '#555' }} />
             {backendStatus === 'ok' ? 'SYS ONLINE' : backendStatus === 'offline' ? 'SYS OFFLINE' : 'INIT...'}
           </div>
         </div>
       </header>
 
-      {/* Body */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-
-        {/* Orb Panel */}
         <div style={{
-          width: 260, flexShrink: 0,
-          display: 'flex', flexDirection: 'column', alignItems: 'center',
-          justifyContent: 'center', gap: 16,
-          borderRight: '1px solid var(--border)',
-          background: 'rgba(4,15,18,0.7)',
+          width: 260, flexShrink: 0, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', gap: 16,
+          borderRight: '1px solid var(--border)', background: 'rgba(4,15,18,0.7)',
           position: 'relative', padding: '24px 0',
         }}>
           <div style={{ position: 'relative' }}>
@@ -444,18 +460,14 @@ export default function Home() {
           </div>
 
           <div style={{ textAlign: 'center', fontFamily: 'Share Tech Mono, monospace', fontSize: 10, letterSpacing: '0.15em' }}>
-            <div style={{
-              color: listening ? '#50dc78' : speaking ? 'var(--accent)' : 'var(--primary)',
-              marginBottom: 4,
-              transition: 'color 200ms ease',
-            }}>
-              {listening ? 'LISTENING...' : speaking ? 'SPEAKING...' : loading ? 'PROCESSING...' : 'STANDBY'}
+            <div style={{ color: statusColor, marginBottom: 4, transition: 'color 200ms ease' }}>
+              {statusLabel}
             </div>
             <div style={{ color: 'var(--text-faint)' }}>MNQ · MES FUTURES</div>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', padding: '0 16px', marginTop: 8 }}>
-            {['MNQ market outlook', 'Key support levels MES', 'Futures news today', 'Pre-market analysis'].map(prompt => (
+            {['MNQ market outlook', 'Key support levels MES', 'Look at my screen', 'Pre-market analysis'].map(prompt => (
               <button key={prompt}
                 onClick={() => { setInput(prompt); setTimeout(() => inputRef.current?.focus(), 50); }}
                 style={{
@@ -471,7 +483,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Chat area */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <ChatWindow messages={messages} loading={loading} />
 
@@ -481,13 +492,13 @@ export default function Home() {
               background: 'var(--surface-2)', border: '1px solid var(--border)',
               borderRadius: 6, padding: '10px 14px',
             }}>
-              <span style={{ color: 'var(--primary)', fontFamily: 'Share Tech Mono, monospace', fontSize: 13, alignSelf: 'flex-end', paddingBottom: 1 }}>›</span>
+              <span style={{ color: capturing ? '#ffd700' : 'var(--primary)', fontFamily: 'Share Tech Mono, monospace', fontSize: 13, alignSelf: 'flex-end', paddingBottom: 1 }}>›</span>
               <textarea
                 ref={inputRef}
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask Alpha about MNQ, MES, market conditions, trade setups... or use the mic 🎤"
+                placeholder="Ask Alpha anything... or say 'look at my screen' to analyze your chart 📊"
                 rows={1}
                 style={{
                   flex: 1, background: 'transparent', border: 'none', outline: 'none',
@@ -495,12 +506,8 @@ export default function Home() {
                   resize: 'none', minHeight: 24, maxHeight: 120, overflowY: 'auto', lineHeight: 1.5,
                 }}
               />
-              <MicButton
-                listening={listening}
-                onClick={toggleMic}
-                disabled={loading || speaking}
-              />
-              <button onClick={() => sendMessage()} disabled={loading || !input.trim()}
+              <MicButton listening={listening} onClick={toggleMic} disabled={loading || speaking || capturing} />
+              <button onClick={() => sendMessage()} disabled={loading || !input.trim() || capturing}
                 style={{
                   background: loading || !input.trim() ? 'rgba(0,210,200,0.08)' : 'rgba(0,210,200,0.15)',
                   color: loading || !input.trim() ? 'var(--text-faint)' : 'var(--primary)',
@@ -509,7 +516,7 @@ export default function Home() {
                   fontFamily: 'Orbitron, monospace', fontWeight: 500, fontSize: 10,
                   letterSpacing: '0.15em', transition: 'all 150ms ease', alignSelf: 'flex-end',
                 }}
-              >{loading ? '···' : 'SEND'}</button>
+              >{capturing ? 'CAPTURING' : loading ? '···' : 'SEND'}</button>
             </div>
             <p style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 6, textAlign: 'center', fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em' }}>
               ALPHA v1.0 · LOCAL · NOT FINANCIAL ADVICE
