@@ -6,7 +6,10 @@ import ChatWindow from '@/components/ChatWindow';
 const BACKEND = 'http://localhost:8000';
 const TTS_PLAYBACK_RATE = 1.15;
 const WAKE_WORD = 'alpha';
-const COMMAND_SILENCE_MS = 2000;
+// How long to wait for command after wake word (ms)
+const COMMAND_SILENCE_MS = 2500;
+// How long to wait for first command word after just saying "Alpha" alone (ms)
+const WAKE_ONLY_TIMEOUT_MS = 4000;
 
 const SCREEN_TRIGGERS = [
   'look at my screen', 'what do you see', 'analyze my chart',
@@ -249,33 +252,59 @@ async function captureScreen(): Promise<string | null> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// useWakeWord — fixed version
+//
+// Fixes applied:
+//   1. busyRef  — onresult reads a ref so it always sees the latest busy value
+//                 (stale closure bug that silently dropped every transcript)
+//   2. isFinal gate — wake word is only triggered on a *final* result, not
+//                 interim fragments that can fire repeatedly mid-word
+//   3. Two-phase "Alpha alone" support — saying just "Alpha" with nothing
+//                 after it now opens a 4-second window for the next utterance
+// ---------------------------------------------------------------------------
 function useWakeWord(
   enabled: boolean,
   onCommand: (text: string) => void,
   busy: boolean,
 ) {
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const commandBuffer = useRef<string>('');
-  const awaitingCommand = useRef(false);
-  const silenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [wakeListening, setWakeListening] = useState(false);
+  const recognitionRef   = useRef<SpeechRecognition | null>(null);
+  const commandBuffer    = useRef<string>('');
+  const awaitingCommand  = useRef(false);
+  const silenceTimer     = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wakeOnlyTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [wakeListening, setWakeListening]       = useState(false);
   const [commandListening, setCommandListening] = useState(false);
 
+  // FIX 1: keep busy in a ref so onresult closure always sees the current value
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+
   const clearSilenceTimer = () => {
-    if (silenceTimer.current) {
-      clearTimeout(silenceTimer.current);
-      silenceTimer.current = null;
-    }
+    if (silenceTimer.current) { clearTimeout(silenceTimer.current); silenceTimer.current = null; }
+  };
+  const clearWakeOnlyTimer = () => {
+    if (wakeOnlyTimer.current) { clearTimeout(wakeOnlyTimer.current); wakeOnlyTimer.current = null; }
   };
 
   const flushCommand = useCallback(() => {
     clearSilenceTimer();
+    clearWakeOnlyTimer();
     const cmd = commandBuffer.current.trim();
     commandBuffer.current = '';
     awaitingCommand.current = false;
     setCommandListening(false);
     if (cmd) onCommand(cmd);
   }, [onCommand]);
+
+  // Cancel command mode without sending anything (e.g. wake-only timeout expired)
+  const cancelCommand = useCallback(() => {
+    clearSilenceTimer();
+    clearWakeOnlyTimer();
+    commandBuffer.current = '';
+    awaitingCommand.current = false;
+    setCommandListening(false);
+  }, []);
 
   useEffect(() => {
     const SR =
@@ -287,33 +316,54 @@ function useWakeWord(
     if (!SR) return;
 
     const rec = new SR();
-    rec.continuous = true;
+    rec.continuous     = true;
     rec.interimResults = true;
-    rec.lang = 'en-US';
+    rec.lang           = 'en-US';
     recognitionRef.current = rec;
 
     rec.onresult = (event: SpeechRecognitionEvent) => {
-      if (busy) return;
+      // FIX 1: use ref, not the stale closure value
+      if (busyRef.current) return;
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
+        const result     = event.results[i];
         const transcript = result[0].transcript.toLowerCase().trim();
-        const isFinal = result.isFinal;
+        const isFinal    = result.isFinal;
+
         if (!awaitingCommand.current) {
-          if (transcript.includes(WAKE_WORD)) {
+          // FIX 2: only act on FINAL results for wake-word detection
+          if (isFinal && transcript.includes(WAKE_WORD)) {
             awaitingCommand.current = true;
             setCommandListening(true);
-            const afterWake = transcript.split(WAKE_WORD).slice(1).join(WAKE_WORD).trim();
+
+            const afterWake = transcript
+              .split(WAKE_WORD)
+              .slice(1)
+              .join(WAKE_WORD)
+              .trim();
+
             if (afterWake) {
+              // "Alpha do something" — command is already in this utterance
               commandBuffer.current = afterWake;
+              clearWakeOnlyTimer();
               clearSilenceTimer();
               silenceTimer.current = setTimeout(flushCommand, COMMAND_SILENCE_MS);
+            } else {
+              // FIX 3: "Alpha" alone — open a window for the NEXT utterance
+              clearSilenceTimer();
+              wakeOnlyTimer.current = setTimeout(cancelCommand, WAKE_ONLY_TIMEOUT_MS);
             }
           }
         } else {
+          // Already in command mode — collect the next spoken sentence
           if (isFinal) {
-            commandBuffer.current += ' ' + result[0].transcript.trim();
-            clearSilenceTimer();
-            silenceTimer.current = setTimeout(flushCommand, COMMAND_SILENCE_MS);
+            const spoken = result[0].transcript.trim();
+            if (spoken) {
+              commandBuffer.current += (commandBuffer.current ? ' ' : '') + spoken;
+              clearWakeOnlyTimer();
+              clearSilenceTimer();
+              silenceTimer.current = setTimeout(flushCommand, COMMAND_SILENCE_MS);
+            }
           }
         }
       }
@@ -336,6 +386,8 @@ function useWakeWord(
     return () => {
       rec.onend = null;
       try { rec.stop(); } catch (_) {}
+      clearSilenceTimer();
+      clearWakeOnlyTimer();
       setWakeListening(false);
       setCommandListening(false);
     };
@@ -349,24 +401,24 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([{
     id: '0',
     role: 'assistant',
-    content: 'ALPHA ONLINE. Wake word active - just say "Alpha" followed by your command. Ask me about market conditions, price levels, technicals, news, or trade setups.',
+    content: 'ALPHA ONLINE. Wake word active - just say "Alpha" followed by your command, or say "Alpha" alone and then speak your command. Ask me about market conditions, price levels, technicals, news, or trade setups.',
     timestamp: new Date(),
     model: 'claude-sonnet-4-6',
   }]);
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [speaking, setSpeaking] = useState(false);
-  const [listening, setListening] = useState(false);
-  const [capturing, setCapturing] = useState(false);
+  const [input, setInput]               = useState('');
+  const [loading, setLoading]           = useState(false);
+  const [speaking, setSpeaking]         = useState(false);
+  const [listening, setListening]       = useState(false);
+  const [capturing, setCapturing]       = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [wakeEnabled, setWakeEnabled] = useState(true);
-  const [activeModel, setActiveModel] = useState<string>('claude-sonnet-4-6');
+  const [wakeEnabled, setWakeEnabled]   = useState(true);
+  const [activeModel, setActiveModel]   = useState<string>('claude-sonnet-4-6');
   const [lastHadImage, setLastHadImage] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const mediaRecRef = useRef<MediaRecorder | null>(null);
-  const audioChunks = useRef<Blob[]>([]);
-  const currentAudio = useRef<HTMLAudioElement | null>(null);
+  const inputRef      = useRef<HTMLTextAreaElement>(null);
+  const mediaRecRef   = useRef<MediaRecorder | null>(null);
+  const audioChunks   = useRef<Blob[]>([]);
+  const currentAudio  = useRef<HTMLAudioElement | null>(null);
   const sendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
 
   useEffect(() => {
@@ -386,8 +438,8 @@ export default function Home() {
         body: JSON.stringify({ text }),
       });
       if (!res.ok) throw new Error('TTS failed');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
+      const blob  = await res.blob();
+      const url   = URL.createObjectURL(blob);
       const audio = new Audio(url);
       audio.playbackRate = TTS_PLAYBACK_RATE;
       currentAudio.current = audio;
@@ -441,7 +493,7 @@ export default function Home() {
         body: JSON.stringify({ message: text, history, image_base64: imageBase64 }),
       });
       if (!res.ok) throw new Error('Backend error');
-      const data = await res.json();
+      const data  = await res.json();
       const model = data.model || 'claude-sonnet-4-6';
       setActiveModel(model);
       setLastHadImage(!!imageBase64);
@@ -494,7 +546,7 @@ export default function Home() {
         const formData = new FormData();
         formData.append('audio', audioBlob, 'recording.webm');
         try {
-          const res = await fetch(`${BACKEND}/voice/stt`, { method: 'POST', body: formData });
+          const res  = await fetch(`${BACKEND}/voice/stt`, { method: 'POST', body: formData });
           const data = await res.json();
           if (data.text?.trim()) await sendMessageRef.current(data.text.trim());
         } catch (e) { console.error('STT error:', e); }
@@ -512,21 +564,21 @@ export default function Home() {
   };
 
   const statusLabel =
-    capturing ? 'CAPTURING...' :
-    commandListening ? 'COMMAND...' :
-    listening ? 'LISTENING...' :
-    speaking ? 'SPEAKING...' :
-    loading ? 'PROCESSING...' :
-    wakeListening ? 'WAKE ACTIVE' :
+    capturing        ? 'CAPTURING...'  :
+    commandListening ? 'COMMAND...'    :
+    listening        ? 'LISTENING...'  :
+    speaking         ? 'SPEAKING...'   :
+    loading          ? 'PROCESSING...' :
+    wakeListening    ? 'WAKE ACTIVE'   :
     'STANDBY';
 
   const statusColor =
-    capturing ? '#ffd700' :
-    commandListening ? '#50dc78' :
-    listening ? '#50dc78' :
-    speaking ? 'var(--accent)' :
-    loading ? 'var(--primary)' :
-    wakeListening ? 'rgba(80,160,255,0.9)' :
+    capturing        ? '#ffd700'               :
+    commandListening ? '#50dc78'               :
+    listening        ? '#50dc78'               :
+    speaking         ? 'var(--accent)'         :
+    loading          ? 'var(--primary)'        :
+    wakeListening    ? 'rgba(80,160,255,0.9)'  :
     'var(--primary)';
 
   return (
