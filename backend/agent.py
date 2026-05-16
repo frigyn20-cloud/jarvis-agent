@@ -14,11 +14,36 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+CLAUDE_MODEL      = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
-# Model selection — change CLAUDE_MODEL in .env to switch
-# claude-haiku-4-5   = cheapest (~50 credits/msg) → use during dev
-# claude-sonnet-4-5  = best (~500 credits/msg)   → use in production
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
+# ─── Keywords that trigger Claude (complex / analysis tasks) ───────────────────────
+CLAUDE_TRIGGERS = [
+    # instruments
+    "mnq", "mes", "nq", "es", "nasdaq", "s&p", "sp500", "spx", "ndx",
+    "futures", "contract", "ticker", "symbol",
+    # analysis
+    "analysis", "analyze", "analyse", "technical", "technicals",
+    "setup", "trade setup", "entry", "exit", "target", "stop",
+    "support", "resistance", "level", "levels",
+    "trend", "bias", "direction", "breakout", "breakdown",
+    "vwap", "rsi", "macd", "ema", "sma", "moving average",
+    "volume", "momentum", "divergence", "confluence",
+    # market data
+    "price", "market", "chart", "candle", "session",
+    "pre-market", "premarket", "after hours", "afterhours",
+    "open", "close", "high", "low", "range",
+    "bull", "bear", "rally", "sell off", "selloff", "dip", "pump", "dump",
+    # risk
+    "risk", "reward", "r:r", "position size", "sizing", "pnl", "p&l",
+    "loss", "profit", "drawdown", "leverage",
+    # macro
+    "fomc", "fed", "cpi", "nfp", "gdp", "pce", "earnings",
+    "economic", "calendar", "catalyst", "news", "report",
+    # search intent
+    "what is", "what's", "whats", "how is", "where is",
+    "current", "today", "now", "live", "latest", "recent",
+    "summarize", "summary", "explain", "why", "should i",
+]
 
 SYSTEM_PROMPT = """
 You are Alpha, an AI-powered trading assistant specialized in US equity index futures — specifically MNQ (Micro Nasdaq-100) and MES (Micro E-mini S&P 500).
@@ -44,20 +69,25 @@ Trading focus areas:
 - Session context: RTH vs ETH, key open/close levels
 
 Rules:
-- ALWAYS use web_search for: current prices, today’s news, live market data, economic releases.
+- ALWAYS use web_search for: current prices, today's news, live market data, economic releases.
 - Use calculator for any math: P&L, risk %, contract value, etc.
-- Use get_time to assess whether markets are open (RTH: 9:30am–4pm ET).
-- When asked about levels, structure: Trend → Key Levels → Bias → What to watch.
+- Use get_time to assess whether markets are open (RTH: 9:30am-4pm ET).
+- When asked about levels, structure: Trend -> Key Levels -> Bias -> What to watch.
 - Never give financial advice or tell the user to buy/sell. Present analysis only.
 - Be direct. Skip filler phrases. Lead with data.
-- If you don’t know something, search. Never guess prices or levels.
+- If you don't know something, search. Never guess prices or levels.
 """
 
 
+def needs_claude(message: str) -> bool:
+    """Return True if the message needs Claude's reasoning power."""
+    msg_lower = message.lower()
+    return any(kw in msg_lower for kw in CLAUDE_TRIGGERS)
+
+
 def get_primary_llm():
-    """Claude — primary reasoning brain."""
     if not ANTHROPIC_API_KEY:
-        raise ValueError("ANTHROPIC_API_KEY not set in backend/.env")
+        raise ValueError("ANTHROPIC_API_KEY not set")
     from langchain_anthropic import ChatAnthropic
     return ChatAnthropic(
         api_key=ANTHROPIC_API_KEY,
@@ -67,10 +97,9 @@ def get_primary_llm():
     )
 
 
-def get_fallback_llm():
-    """Groq llama — cheap fast fallback."""
+def get_groq_llm():
     if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY not set in backend/.env")
+        raise ValueError("GROQ_API_KEY not set")
     from langchain_groq import ChatGroq
     return ChatGroq(api_key=GROQ_API_KEY, model=GROQ_MODEL, temperature=0.2)
 
@@ -80,29 +109,47 @@ class AgentState(TypedDict):
     tool_calls_made: list[str]
     pending_confirmation: dict | None
     used_fallback: bool
+    routed_to: str   # 'claude' | 'groq'
 
 
 def agent_node(state: AgentState):
-    messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
+    messages_in = state["messages"]
+    system_msgs = [SystemMessage(content=SYSTEM_PROMPT)] + messages_in
+
+    # ─── Determine which model to use ─────────────────────────────────
+    last_human = next(
+        (m.content for m in reversed(messages_in) if isinstance(m, HumanMessage)), ""
+    )
+    use_claude = needs_claude(last_human)
+    routed_to  = "groq"   # default
     used_fallback = False
 
-    try:
-        llm = get_primary_llm().bind_tools(ALL_TOOLS)
-        response = llm.invoke(messages)
-        logger.info(f"[Alpha] Using {CLAUDE_MODEL}")
-    except Exception as claude_err:
-        logger.warning(f"[Alpha] Claude failed: {claude_err} — falling back to Groq")
-        used_fallback = True
+    if use_claude:
+        # Try Claude first, fall back to Groq on failure
         try:
-            llm = get_fallback_llm().bind_tools(ALL_TOOLS)
-            response = llm.invoke(messages)
-            logger.info("[Alpha] Using Groq fallback")
+            llm = get_primary_llm().bind_tools(ALL_TOOLS)
+            response = llm.invoke(system_msgs)
+            routed_to = "claude"
+            logger.info(f"[Alpha] CLAUDE → {CLAUDE_MODEL} | query: {last_human[:60]}")
+        except Exception as e:
+            logger.warning(f"[Alpha] Claude failed: {e} — falling back to Groq")
+            used_fallback = True
+            use_claude = False  # fall through to Groq below
+
+    if not use_claude:
+        # Groq handles simple chat OR Claude fallback
+        try:
+            llm = get_groq_llm().bind_tools(ALL_TOOLS)
+            response = llm.invoke(system_msgs)
+            routed_to = "groq"
+            logger.info(f"[Alpha] GROQ → {GROQ_MODEL} | query: {last_human[:60]}")
         except Exception as groq_err:
             err = str(groq_err)
             if "tool_use_failed" in err or "failed_generation" in err:
-                fallback = get_fallback_llm()
+                fallback = get_groq_llm()
                 fp = SystemMessage(content=SYSTEM_PROMPT + "\n\nNOTE: Tool calling unavailable. Answer from training knowledge.")
-                response = fallback.invoke([fp] + state["messages"])
+                response = fallback.invoke([fp] + messages_in)
+                routed_to = "groq"
             else:
                 raise
 
@@ -111,6 +158,7 @@ def agent_node(state: AgentState):
         "tool_calls_made": state.get("tool_calls_made", []),
         "pending_confirmation": None,
         "used_fallback": used_fallback,
+        "routed_to": routed_to,
     }
 
 
@@ -164,6 +212,7 @@ async def run_agent(message: str, history: list[dict]) -> dict:
         "tool_calls_made": [],
         "pending_confirmation": None,
         "used_fallback": False,
+        "routed_to": "groq",
     })
 
     final_messages = result["messages"]
@@ -176,11 +225,13 @@ async def run_agent(message: str, history: list[dict]) -> dict:
             for tc in msg.tool_calls:
                 tool_calls_log.append({"tool": tc["name"], "input": tc.get("args", {})})
 
-    model_used = "groq-fallback" if result.get("used_fallback") else CLAUDE_MODEL
+    routed_to = result.get("routed_to", "groq")
+    model_label = CLAUDE_MODEL if routed_to == "claude" else f"groq-{GROQ_MODEL}"
 
     return {
         "reply": reply,
         "tool_calls": tool_calls_log,
         "pending_confirmation": result.get("pending_confirmation"),
-        "model": model_used,
+        "model": model_label,
+        "routed_to": routed_to,
     }
