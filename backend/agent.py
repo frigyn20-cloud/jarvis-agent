@@ -11,31 +11,39 @@ from tools import ALL_TOOLS, CONFIRM_REQUIRED_TOOLS
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 SYSTEM_PROMPT = """
-You are Jarvis, a smart and helpful personal AI assistant. You are concise, friendly, and practical.
+You are Alpha, an AI-powered trading assistant specialized in US equity index futures — specifically MNQ (Micro Nasdaq-100) and MES (Micro E-mini S&P 500).
+
+Your personality: precise, confident, professional. You speak like a seasoned trader, not a chatbot. Use concise language. Lead with the most important information.
 
 You have access to these tools:
-- web_search: search the internet for ANY information
-- calculator: do math
-- get_time: check current date/time
-- summarize_text: summarize pasted text
-- remember: save a fact to long-term memory
-- recall: search long-term memory
-- open_url: open a website in the browser
+- web_search: search the internet for real-time prices, news, analysis, market data
+- calculator: perform math (P&L, position sizing, risk/reward ratios)
+- get_time: get current date/time (useful for market session context)
+- summarize_text: summarize pasted articles or reports
+- remember: save user preferences, key levels, or trade notes to memory
+- recall: retrieve saved notes and key levels
+- open_url: open a URL in the browser
+
+Trading focus areas:
+- MNQ and MES futures price levels, support/resistance, trend analysis
+- Pre-market and after-hours futures activity
+- Economic calendar events that move NQ/ES (CPI, FOMC, NFP, etc.)
+- Technical analysis: moving averages, RSI, MACD, volume, VWAP
+- Risk management: position sizing, stop placement, R:R calculation
+- Market news: Fed policy, macro events, tech earnings (NQ is tech-heavy)
+- Session context: RTH vs ETH, key open/close levels
 
 Rules:
-- DEFAULT to using web_search for almost any factual question. Your training data has a cutoff, so search for anything about: people, places, companies, products, science, history, sports, news, weather, prices, how-to, definitions, or any topic where accuracy matters.
-- ALWAYS use web_search for: current events, news, weather, stock prices, sports scores, recent releases, anything that changes over time.
-- Use calculator for all math.
-- Use get_time when asked about the current date or time.
-- Use recall before answering personal questions about the user.
-- Only answer from memory (without searching) for: simple greetings, basic math, and things you are absolutely certain about.
-- If web_search returns results, summarize them clearly and cite the source URLs.
-- Never make up facts. When unsure, search.
-- Keep answers concise but complete.
-- When using open_url, always confirm with the user before calling it.
+- ALWAYS use web_search for: current prices, today's news, live market data, economic releases.
+- Use calculator for any math: P&L, risk %, contract value, etc.
+- Use get_time to assess whether markets are open (RTH: 9:30am-4pm ET, Futures ETH continues).
+- When asked about levels, structure your answer: Trend → Key Levels → Bias → What to watch.
+- Never give financial advice or tell the user to buy/sell. Present analysis only.
+- Be direct. Skip filler phrases. Lead with data.
+- If you don't know something, search. Never guess prices or levels.
 """
 
 
@@ -47,45 +55,30 @@ class AgentState(TypedDict):
 
 def get_llm():
     if not GROQ_API_KEY:
-        raise ValueError(
-            "GROQ_API_KEY is not set. "
-            "Get a free key at https://console.groq.com and add it to backend/.env"
-        )
-    return ChatGroq(
-        api_key=GROQ_API_KEY,
-        model=GROQ_MODEL,
-        temperature=0.2,
-    )
+        raise ValueError("GROQ_API_KEY not set. Add it to backend/.env")
+    return ChatGroq(api_key=GROQ_API_KEY, model=GROQ_MODEL, temperature=0.2)
 
 
 def agent_node(state: AgentState):
     llm = get_llm().bind_tools(ALL_TOOLS)
-    system_msg = SystemMessage(content=SYSTEM_PROMPT)
-    messages = [system_msg] + state["messages"]
+    messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
     try:
         response = llm.invoke(messages)
     except Exception as e:
         err = str(e)
-        # Tool call formatting failed — retry without tools so we still get an answer
         if "tool_use_failed" in err or "failed_generation" in err:
-            fallback_llm = get_llm()
-            fallback_prompt = SystemMessage(
-                content=SYSTEM_PROMPT + "\n\nNOTE: Tool calling is unavailable right now. Answer as best you can from your training knowledge."
-            )
-            response = fallback_llm.invoke([fallback_prompt] + state["messages"])
+            fallback = get_llm()
+            fp = SystemMessage(content=SYSTEM_PROMPT + "\n\nNOTE: Tool calling unavailable. Answer from training knowledge.")
+            response = fallback.invoke([fp] + state["messages"])
         else:
             raise
-    return {
-        "messages": [response],
-        "tool_calls_made": state.get("tool_calls_made", []),
-        "pending_confirmation": None,
-    }
+    return {"messages": [response], "tool_calls_made": state.get("tool_calls_made", []), "pending_confirmation": None}
 
 
 def should_continue(state: AgentState):
-    last_message = state["messages"][-1]
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        for tc in last_message.tool_calls:
+    last = state["messages"][-1]
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        for tc in last.tool_calls:
             if tc["name"] in CONFIRM_REQUIRED_TOOLS:
                 return "needs_confirmation"
         return "tools"
@@ -93,40 +86,25 @@ def should_continue(state: AgentState):
 
 
 def confirmation_node(state: AgentState):
-    last_message = state["messages"][-1]
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        confirm_tools = [
-            tc for tc in last_message.tool_calls
-            if tc["name"] in CONFIRM_REQUIRED_TOOLS
-        ]
-        if confirm_tools:
-            return {
-                "messages": state["messages"],
-                "tool_calls_made": state.get("tool_calls_made", []),
-                "pending_confirmation": confirm_tools[0],
-            }
+    last = state["messages"][-1]
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        ct = [tc for tc in last.tool_calls if tc["name"] in CONFIRM_REQUIRED_TOOLS]
+        if ct:
+            return {**state, "pending_confirmation": ct[0]}
     return state
 
 
 def build_graph():
     tool_node = ToolNode(ALL_TOOLS)
-    graph = StateGraph(AgentState)
-    graph.add_node("agent", agent_node)
-    graph.add_node("tools", tool_node)
-    graph.add_node("needs_confirmation", confirmation_node)
-    graph.set_entry_point("agent")
-    graph.add_conditional_edges(
-        "agent",
-        should_continue,
-        {
-            "tools": "tools",
-            "needs_confirmation": "needs_confirmation",
-            END: END,
-        },
-    )
-    graph.add_edge("tools", "agent")
-    graph.add_edge("needs_confirmation", END)
-    return graph.compile()
+    g = StateGraph(AgentState)
+    g.add_node("agent", agent_node)
+    g.add_node("tools", tool_node)
+    g.add_node("needs_confirmation", confirmation_node)
+    g.set_entry_point("agent")
+    g.add_conditional_edges("agent", should_continue, {"tools": "tools", "needs_confirmation": "needs_confirmation", END: END})
+    g.add_edge("tools", "agent")
+    g.add_edge("needs_confirmation", END)
+    return g.compile()
 
 
 APP_GRAPH = build_graph()
@@ -135,29 +113,15 @@ APP_GRAPH = build_graph()
 async def run_agent(message: str, history: list[dict]) -> dict:
     lc_messages = []
     for msg in history[-10:]:
-        if msg["role"] == "user":
-            lc_messages.append(HumanMessage(content=msg["content"]))
-        elif msg["role"] == "assistant":
-            lc_messages.append(AIMessage(content=msg["content"]))
-
+        if msg["role"] == "user":      lc_messages.append(HumanMessage(content=msg["content"]))
+        elif msg["role"] == "assistant": lc_messages.append(AIMessage(content=msg["content"]))
     lc_messages.append(HumanMessage(content=message))
 
-    initial_state: AgentState = {
-        "messages": lc_messages,
-        "tool_calls_made": [],
-        "pending_confirmation": None,
-    }
-
-    result = await APP_GRAPH.ainvoke(initial_state)
+    result = await APP_GRAPH.ainvoke({"messages": lc_messages, "tool_calls_made": [], "pending_confirmation": None})
 
     final_messages = result["messages"]
-    last_ai_message = None
-    for msg in reversed(final_messages):
-        if isinstance(msg, AIMessage):
-            last_ai_message = msg
-            break
-
-    reply = last_ai_message.content if last_ai_message else "Sorry, I could not generate a response."
+    last_ai = next((m for m in reversed(final_messages) if isinstance(m, AIMessage)), None)
+    reply = last_ai.content if last_ai else "No response."
 
     tool_calls_log = []
     for msg in final_messages:
@@ -165,8 +129,4 @@ async def run_agent(message: str, history: list[dict]) -> dict:
             for tc in msg.tool_calls:
                 tool_calls_log.append({"tool": tc["name"], "input": tc.get("args", {})})
 
-    return {
-        "reply": reply,
-        "tool_calls": tool_calls_log,
-        "pending_confirmation": result.get("pending_confirmation"),
-    }
+    return {"reply": reply, "tool_calls": tool_calls_log, "pending_confirmation": result.get("pending_confirmation")}
