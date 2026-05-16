@@ -8,6 +8,7 @@ from typing import TypedDict, Annotated, Optional
 import operator
 from tools import ALL_TOOLS, CONFIRM_REQUIRED_TOOLS
 from trading_state import get_session
+from memory import get_all_memories
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -15,26 +16,49 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-CLAUDE_MODEL      = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
+CLAUDE_MODEL      = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
-# ─── Claude triggers ───────────────────────────────────────────────────────────────────────────────
+# ── Load strategy from file (hot-reloaded on every request) ─────────────────
+STRATEGY_FILE = os.path.join(os.path.dirname(__file__), "strategy.md")
+
+def load_strategy() -> str:
+    """Read strategy.md from disk. Returns empty string if file missing."""
+    try:
+        with open(STRATEGY_FILE, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        logger.warning("strategy.md not found — strategy context will be empty.")
+        return ""
+
+# ── Auto-load all memories into prompt ──────────────────────────────────────
+def load_memory_context() -> str:
+    """Fetch all saved memories and format them for injection into the prompt."""
+    try:
+        memories = get_all_memories()
+        if not memories:
+            return ""
+        lines = ["== LONG-TERM MEMORY (facts you know about the user and their preferences) =="]
+        for m in memories:
+            lines.append(f"- {m['key']}: {m['value']}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"Could not load memories: {e}")
+        return ""
+
+# ─── Claude triggers ─────────────────────────────────────────────────────────
 CLAUDE_TRIGGERS = [
-    # ─ Futures & instruments ─────────────────────────────────────────────────────
     "mnq", "mes", "nq futures", "es futures",
     "nasdaq futures", "s&p futures", "sp500", "spx", "ndx",
     "micro nasdaq", "micro s&p", "e-mini",
-    # ─ Trade management ──────────────────────────────────────────────────────
     "trade setup", "trade plan", "entry zone", "exit zone",
     "long setup", "short setup", "going long", "going short",
     "buy stop", "sell stop", "buy limit", "sell limit",
     "stop loss", "take profit", "trailing stop",
     "position size", "position sizing", "risk reward", "r:r", "r/r",
     "p&l", "pnl", "unrealized", "drawdown", "max loss",
-    # ─ Technical indicators ───────────────────────────────────────────────────
     "vwap", "rsi", "macd", "ema", "sma", "moving average",
     "bollinger", "stochastic", "atr", "ichimoku",
     "support level", "resistance level", "key level",
-    # ─ ICT concepts ──────────────────────────────────────────────────────────
     "fvg", "ifvg", "fair value gap", "inverse fvg",
     "order block", "ob", "breaker block",
     "smt", "smt divergence", "smart money",
@@ -45,23 +69,19 @@ CLAUDE_TRIGGERS = [
     "breakout", "breakdown", "fakeout",
     "trend line", "trendline", "channel", "wedge", "flag pattern",
     "premium", "discount", "equilibrium",
-    # ─ Sessions & timing ──────────────────────────────────────────────────
     "pre-market", "premarket", "after hours", "afterhours",
     "rth", "eth", "globex", "overnight session",
     "market open", "market close", "power hour",
     "gap up", "gap down", "opening range",
-    # ─ Economic events ─────────────────────────────────────────────────────
     "fomc", "federal reserve", "fed meeting", "rate decision",
     "cpi report", "pce report", "nfp", "jobs report",
     "gdp report", "earnings report", "economic calendar",
-    # ─ Market analysis ──────────────────────────────────────────────────────
     "futures price", "futures level", "live price",
     "market outlook", "market analysis", "technical analysis",
     "price action", "price level",
     "bias", "bullish bias", "bearish bias",
     "1h", "4h", "15m", "5m", "1m", "3m",
     "timeframe", "htf", "ltf",
-    # ─ Live data / news / research ───────────────────────────────────────────
     "news", "latest", "today", "right now", "current", "live",
     "what happened", "what's happening", "what is happening",
     "breaking", "update", "updates", "headline", "headlines",
@@ -76,88 +96,69 @@ CLAUDE_TRIGGERS = [
     "search", "look up", "find out", "tell me about",
     "what is", "who is", "where is", "when is", "how much",
     "weather", "forecast",
-    # ─ Vision / screen capture ────────────────────────────────────────────────
     "look at my screen", "what do you see", "analyze my chart",
     "check the chart", "what's on my screen", "read the chart",
     "look at this", "can you see", "chart analysis",
+    "remember", "recall", "do you know", "my name", "my account",
+    "my risk", "my strategy", "my preference",
 ]
 
-# ─── System prompts ────────────────────────────────────────────────────────────────────
-
-ICT_STRATEGY = """
-== YOUR TRADER'S STRATEGY: PB BLAKE ICT MODEL ==
-
-This is a mechanical ICT model. You know these rules precisely.
-
-STEP 1 — ESTABLISH HTF BIAS (1H + 4H CHARTS)
-- BULLISH bias: price makes Higher Highs + Higher Lows AND respects bullish FVGs (bounces from them) AND disrespects bearish FVGs (breaks through them)
-- BEARISH bias: price makes Lower Lows + Lower Highs AND respects bearish FVGs AND disrespects bullish FVGs
-- ALSO check for high timeframe SMT divergence between correlated instruments (ES vs NQ) as additional bias confirmation
-
-STEP 2 — POST OPEN FVG DRAW (after 9:30 AM ET)
-- BEARISH bias → wait for price to reach a 15m-1h FVG ABOVE current price (premium zone)
-- BULLISH bias → wait for price to reach a 15m-1h FVG BELOW current price (discount zone)
-- If this FVG was previously touched: the associated swing high (bearish) or swing low (bullish) MUST be swept before entry is valid
-
-STEP 3 — IDENTIFY HIGHEST TIMEFRAME iFVG (1m-5m)
-- From the 15m-1h FVG that was hit, scan 1m-5m charts for the highest timeframe inverse FVG
-- PRIORITY RULE: If you see a 3m iFVG but a 5m FVG has NOT yet been inversed — WAIT for the 5m to inverse first
-- The iFVG direction MUST align with HTF bias
-- SMT divergence at this level = additional confirmation (optional but adds conviction)
-
-STEP 4 — EXECUTE
-- Entry triggers when the highest available timeframe iFVG forms in bias direction
-- Optional: confirm with SMT divergence
-
-KEY CONCEPTS:
-- FVG = Fair Value Gap (3-candle imbalance)
-- iFVG = Inverse FVG (a FVG that was later violated/inverted, now acts as support/resistance)
-- SMT = Smart Money Technique divergence (e.g. ES makes new high but NQ does not = bearish divergence)
-- Premium zone = above current price / above equilibrium
-- Discount zone = below current price / below equilibrium
-- Sweeping a swing = price briefly takes out the swing high/low (liquidity grab) before reversing
+# ─── Base personality shared by all prompts ──────────────────────────────────
+BASE_PERSONALITY = """
+You are Alpha, an AI-powered trading assistant and general assistant.
+Personality: calm, confident, professional — like a trusted British butler who is also a seasoned trader.
+Always address the user as "sir".
+Speak in natural, conversational sentences. Never use bullet points, tables, pipe characters, or markdown formatting.
+Be concise. Two to four sentences for most answers. Do not pad responses.
+When uncertain, say so plainly. Do not fabricate data or price levels.
+Respond as if speaking aloud — your words will be read by a text-to-speech engine.
 """
 
-ANALYSIS_PROMPT = f"""
-You are Alpha, an AI-powered trading assistant specialized in US equity index futures — MNQ (Micro Nasdaq-100) and MES (Micro E-mini S&P 500).
 
-PERSONALITY & TONE:
-- You are calm, confident, and professional — like a trusted British butler who is also a seasoned trader.
-- Always address the user as "sir".
-- Speak in natural, conversational sentences. Never use bullet points, tables, pipe characters, or markdown formatting in your responses.
-- Instead of "NQ: 19,124 | -93 | -0.24%" say "NQ is currently trading at 19,124, sir, down 93 points or about a quarter of a percent on the day."
-- Instead of listing levels with pipes, say them naturally: "Key support sits around 19,050, with resistance up at 19,200."
-- Be concise. Two to four sentences for most answers. Do not pad responses.
-- When uncertain, say so plainly. Do not fabricate levels.
+def build_system_prompt(include_strategy: bool = True, include_tools: bool = True, session_context: str = "") -> str:
+    """Assemble the full system prompt dynamically on every request."""
+    parts = [BASE_PERSONALITY]
 
-Tools available: web_search, calculator, get_time, summarize_text, remember, recall, open_url.
+    # ── Long-term memory (always injected) ──
+    memory_ctx = load_memory_context()
+    if memory_ctx:
+        parts.append(memory_ctx)
 
-VISION: When an image is provided, it is a screenshot of the user's screen — likely a TradingView chart.
-Analyze it using the ICT model below. Walk through what you see: structure, FVGs, iFVGs, bias.
-Speak as if describing the chart aloud to the user. Be specific about price levels if visible.
+    # ── Trading strategy ──
+    if include_strategy:
+        strategy = load_strategy()
+        if strategy:
+            parts.append(strategy)
 
-{ICT_STRATEGY}
+    # ── Session state ──
+    if session_context:
+        parts.append(session_context)
 
-GENERAL RULES:
+    # ── Tool guidance ──
+    if include_tools:
+        parts.append("""
+TOOLS AVAILABLE: web_search, calculator, get_time, summarize_text, remember, recall, open_url.
 - ALWAYS use web_search for current prices, news, live data, economic releases.
 - Use calculator for P&L, position sizing, R:R math.
-- When asked about a setup: walk through Steps 1→4 of the ICT model in plain spoken language.
+- Use remember to save any new fact the user tells you (name, risk preference, account size, etc.).
+- Use recall to look up anything the user has told you before.
+- When asked about a setup: walk through the ICT model steps in plain spoken language.
 - Never give financial advice. Present analysis only.
-- Respond as if speaking aloud — your words will be read by a text-to-speech engine.
-"""
+""")
 
-CHAT_PROMPT = """
-You are Alpha, a sharp and helpful AI assistant with the calm demeanor of a professional British butler.
-Always address the user as "sir".
-Speak in natural, conversational sentences. No bullet points, no markdown, no tables.
-Be warm, brief, and to the point.
-Do NOT bring up trading, markets, or financial topics unless the user asks.
-"""
+    # ── Vision note ──
+    parts.append("""
+VISION: When an image is provided, it is a screenshot of the user's trading screen (likely TradingView).
+Analyze it using the ICT model from the strategy. Walk through structure, FVGs, iFVGs, bias.
+Speak as if describing the chart aloud. Be specific about visible price levels.
+""")
+
+    return "\n\n".join(parts)
 
 
 def needs_claude(message: str, has_image: bool = False) -> bool:
     if has_image:
-        return True  # always use Claude for vision
+        return True
     msg_lower = message.lower()
     return any(trigger in msg_lower for trigger in CLAUDE_TRIGGERS)
 
@@ -182,7 +183,6 @@ def get_groq_llm():
 
 
 def build_human_message(text: str, image_base64: Optional[str] = None) -> HumanMessage:
-    """Build a HumanMessage, optionally with an image for Claude vision."""
     if not image_base64:
         return HumanMessage(content=text)
     return HumanMessage(content=[
@@ -208,53 +208,64 @@ class AgentState(TypedDict):
 
 def agent_node(state: AgentState):
     messages_in = state["messages"]
-    last_human = next(
-        (m.content if isinstance(m.content, str) else m.content[-1].get("text", "")
-         for m in reversed(messages_in) if isinstance(m, HumanMessage)), ""
-    )
-    # Check if last message has an image
-    has_image = False
-    last_msg = next((m for m in reversed(messages_in) if isinstance(m, HumanMessage)), None)
-    if last_msg and isinstance(last_msg.content, list):
-        has_image = any(c.get("type") == "image" for c in last_msg.content if isinstance(c, dict))
 
-    use_claude = needs_claude(last_human, has_image)
-    routed_to = "groq"
+    # Detect last human message text + image
+    last_human = ""
+    has_image  = False
+    last_msg   = next((m for m in reversed(messages_in) if isinstance(m, HumanMessage)), None)
+    if last_msg:
+        if isinstance(last_msg.content, str):
+            last_human = last_msg.content
+        elif isinstance(last_msg.content, list):
+            has_image  = any(c.get("type") == "image" for c in last_msg.content if isinstance(c, dict))
+            last_human = " ".join(c.get("text", "") for c in last_msg.content if isinstance(c, dict) and c.get("type") == "text")
+
+    use_claude   = needs_claude(last_human, has_image)
+    routed_to    = "groq"
     used_fallback = False
-    response = None
+    response     = None
 
+    # Session state
     session = get_session()
-    session_context = f"""
+    session_context = f"== CURRENT SESSION STATE ==\n{session.checklist_summary()}"
 
-== CURRENT SESSION STATE ==
-{session.checklist_summary()}
-"""
+    # Build the full dynamic system prompt (memories + strategy + session)
+    system_prompt = build_system_prompt(
+        include_strategy=True,
+        include_tools=use_claude,  # only give tool guidance to Claude (Groq may not support tools)
+        session_context=session_context,
+    )
 
     if use_claude:
         try:
-            system = SystemMessage(content=ANALYSIS_PROMPT + session_context)
-            llm = get_claude_llm().bind_tools(ALL_TOOLS)
+            system  = SystemMessage(content=system_prompt)
+            llm     = get_claude_llm().bind_tools(ALL_TOOLS)
             response = llm.invoke([system] + messages_in)
             routed_to = "claude"
             logger.info(f"[Alpha] CLAUDE -> {CLAUDE_MODEL} | vision={has_image} | {last_human[:60]}")
         except Exception as e:
-            logger.warning(f"[Alpha] Claude failed: {e} - falling back to Groq")
+            logger.warning(f"[Alpha] Claude failed: {e} — falling back to Groq")
             used_fallback = True
-            use_claude = False
+            use_claude    = False
 
     if not use_claude:
         try:
-            system = SystemMessage(content=CHAT_PROMPT)
+            # Groq gets full prompt too (strategy + memories) but no tool definitions
+            system = SystemMessage(content=build_system_prompt(
+                include_strategy=True,
+                include_tools=False,
+                session_context=session_context,
+            ))
             llm = get_groq_llm()
-            # Groq doesn't support vision — strip image, send text only
-            text_only_messages = []
+            # Strip images for Groq (vision not supported)
+            text_only = []
             for m in messages_in:
                 if isinstance(m, HumanMessage) and isinstance(m.content, list):
                     text = " ".join(c.get("text", "") for c in m.content if isinstance(c, dict) and c.get("type") == "text")
-                    text_only_messages.append(HumanMessage(content=text))
+                    text_only.append(HumanMessage(content=text))
                 else:
-                    text_only_messages.append(m)
-            response = llm.invoke([system] + text_only_messages)
+                    text_only.append(m)
+            response  = llm.invoke([system] + text_only)
             routed_to = "groq"
             logger.info(f"[Alpha] GROQ -> {GROQ_MODEL} | {last_human[:60]}")
         except Exception as e:
@@ -310,11 +321,10 @@ APP_GRAPH = build_graph()
 
 async def run_agent(message: str, history: list[dict], image_base64: Optional[str] = None) -> dict:
     lc_messages = []
-    for msg in history[-10:]:
+    for msg in history[-12:]:  # keep a bit more history
         if msg["role"] == "user":        lc_messages.append(HumanMessage(content=msg["content"]))
         elif msg["role"] == "assistant": lc_messages.append(AIMessage(content=msg["content"]))
 
-    # Attach image to the current message if provided
     lc_messages.append(build_human_message(message, image_base64))
 
     result = await APP_GRAPH.ainvoke({
@@ -327,7 +337,7 @@ async def run_agent(message: str, history: list[dict], image_base64: Optional[st
 
     final_messages = result["messages"]
     last_ai = next((m for m in reversed(final_messages) if isinstance(m, AIMessage)), None)
-    reply = last_ai.content if last_ai else "No response."
+    reply   = last_ai.content if last_ai else "No response."
 
     tool_calls_log = []
     for msg in final_messages:
@@ -339,9 +349,9 @@ async def run_agent(message: str, history: list[dict], image_base64: Optional[st
     model_label = CLAUDE_MODEL if routed_to == "claude" else "groq"
 
     return {
-        "reply": reply,
-        "tool_calls": tool_calls_log,
+        "reply":                reply,
+        "tool_calls":           tool_calls_log,
         "pending_confirmation": result.get("pending_confirmation"),
-        "model": model_label,
-        "routed_to": routed_to,
+        "model":                model_label,
+        "routed_to":            routed_to,
     }
