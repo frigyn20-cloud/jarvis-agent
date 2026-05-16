@@ -1,72 +1,55 @@
-'use client';
-
 import type { Message } from '@/app/page';
-import ToolBadge from './ToolBadge';
 
-interface Props {
-  message: Message;
-}
-
-export default function MessageBubble({ message }: Props) {
+export default function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === 'user';
 
   return (
     <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: isUser ? 'flex-end' : 'flex-start',
-      gap: 6,
-      maxWidth: '80%',
-      alignSelf: isUser ? 'flex-end' : 'flex-start',
+      display: 'flex', alignItems: 'flex-start', gap: 8,
+      flexDirection: isUser ? 'row-reverse' : 'row',
     }}>
-      {/* Role label */}
-      <span style={{
-        fontSize: 11,
-        color: 'var(--text-muted)',
-        paddingInline: 4,
-      }}>
-        {isUser ? 'You' : 'Jarvis'} · {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-      </span>
-
-      {/* Tool call badges — shown above the reply */}
-      {message.toolCalls && message.toolCalls.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-          {message.toolCalls.map((tc, i) => (
-            <ToolBadge key={i} toolName={tc.tool} input={tc.input} />
-          ))}
-        </div>
-      )}
-
-      {/* Message bubble */}
       <div style={{
-        background: isUser ? 'var(--user-bubble)' : 'var(--ai-bubble)',
-        color: 'var(--text)',
-        padding: '10px 14px',
-        borderRadius: isUser
-          ? '14px 14px 4px 14px'
-          : '14px 14px 14px 4px',
-        border: '1px solid var(--border)',
-        lineHeight: 1.6,
-        fontSize: 14,
-        whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word',
+        width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+        background: isUser ? 'rgba(0,210,200,0.15)' : 'rgba(0,210,200,0.1)',
+        border: `1px solid ${isUser ? 'rgba(0,210,200,0.3)' : 'rgba(0,210,200,0.2)'}`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontFamily: 'Share Tech Mono, monospace', fontSize: 9,
+        color: 'var(--primary)', letterSpacing: '0.05em',
       }}>
-        {message.content}
+        {isUser ? 'YOU' : 'AI'}
       </div>
 
-      {/* Pending confirmation banner */}
-      {message.pendingConfirmation && (
+      <div style={{ maxWidth: '75%', display: 'flex', flexDirection: 'column', gap: 3 }}>
         <div style={{
-          background: 'rgba(221, 105, 116, 0.12)',
-          border: '1px solid rgba(221, 105, 116, 0.3)',
-          borderRadius: 8,
-          padding: '8px 12px',
-          fontSize: 12,
-          color: '#dd6974',
+          fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
+          color: 'var(--text-faint)', textAlign: isUser ? 'right' : 'left',
         }}>
-          ⚠️ Jarvis wants to run <strong>{message.pendingConfirmation.name}</strong>. Confirm in the next message.
+          {isUser ? 'You' : 'Alpha'} - {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          {message.hasImage && <span style={{ marginLeft: 6, color: 'var(--primary)' }}>[SCREEN]</span>}
         </div>
-      )}
+
+        {message.pendingConfirmation && (
+          <div style={{
+            fontSize: 11, color: 'var(--yellow)', fontFamily: 'Share Tech Mono, monospace',
+            background: 'rgba(255,200,0,0.06)', border: '1px solid rgba(255,200,0,0.2)',
+            borderRadius: 4, padding: '4px 8px', marginBottom: 4,
+          }}>
+            Alpha wants to run <strong>{message.pendingConfirmation.name}</strong>. Confirm in the next message.
+          </div>
+        )}
+
+        <div style={{
+          background: isUser ? 'rgba(0,210,200,0.08)' : 'var(--surface-2)',
+          border: `1px solid ${isUser ? 'rgba(0,210,200,0.2)' : 'var(--border)'}`,
+          borderRadius: isUser ? '12px 4px 12px 12px' : '4px 12px 12px 12px',
+          padding: '8px 12px',
+          fontSize: 13, lineHeight: 1.6, color: 'var(--text)',
+          fontFamily: isUser ? 'Share Tech Mono, monospace' : 'inherit',
+          whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        }}>
+          {message.content}
+        </div>
+      </div>
     </div>
   );
 }
