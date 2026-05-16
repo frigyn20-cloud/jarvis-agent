@@ -8,6 +8,7 @@ const TTS_PLAYBACK_RATE = 1.15;
 const WAKE_WORD = 'alpha';
 const COMMAND_SILENCE_MS = 2500;
 const WAKE_ONLY_TIMEOUT_MS = 4000;
+const CHANNEL_NAME = 'alpha-wake-channel';
 
 const SCREEN_TRIGGERS = [
   'look at my screen', 'what do you see', 'analyze my chart',
@@ -251,14 +252,7 @@ async function captureScreen(): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
-// useWakeWord
-//
-// Fixes:
-//   1. busyRef        — onresult always sees the latest busy value (no stale closure)
-//   2. isFinal gate   — wake word only fires on a final result, not interim fragments
-//   3. Two-phase mode — "Alpha" alone opens a 4 s window for the next utterance
-//   4. busy→idle reset — when busy transitions false, ALL command state is cleared
-//                        so the hook is always in a clean state for the next invocation
+// useWakeWord — in-tab listener (fallback when popup not open)
 // ---------------------------------------------------------------------------
 function useWakeWord(
   enabled: boolean,
@@ -273,14 +267,12 @@ function useWakeWord(
   const [wakeListening,    setWakeListening]    = useState(false);
   const [commandListening, setCommandListening] = useState(false);
 
-  // FIX 1: always-fresh busy ref read by the onresult closure
   const busyRef = useRef(busy);
   busyRef.current = busy;
 
   const clearSilenceTimer  = () => { if (silenceTimer.current)  { clearTimeout(silenceTimer.current);  silenceTimer.current  = null; } };
   const clearWakeOnlyTimer = () => { if (wakeOnlyTimer.current) { clearTimeout(wakeOnlyTimer.current); wakeOnlyTimer.current = null; } };
 
-  // Full reset — called both on flush and on busy→idle transition
   const resetCommandState = useCallback((runCommand?: string) => {
     clearSilenceTimer();
     clearWakeOnlyTimer();
@@ -290,12 +282,9 @@ function useWakeWord(
     if (runCommand) onCommand(runCommand);
   }, [onCommand]);
 
-  // FIX 4: when busy goes true→false, discard any stale pending command state
-  // so the hook is always clean and ready for the next "Alpha" invocation.
   const prevBusyRef = useRef(busy);
   useEffect(() => {
     if (prevBusyRef.current && !busy) {
-      // Just became idle — cancel any lingering timers / awaiting state
       clearSilenceTimer();
       clearWakeOnlyTimer();
       commandBuffer.current   = '';
@@ -321,40 +310,28 @@ function useWakeWord(
     recognitionRef.current = rec;
 
     rec.onresult = (event: SpeechRecognitionEvent) => {
-      // FIX 1: read ref, not stale closure
       if (busyRef.current) return;
-
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result     = event.results[i];
         const transcript = result[0].transcript.toLowerCase().trim();
         const isFinal    = result.isFinal;
 
         if (!awaitingCommand.current) {
-          // FIX 2: only trigger on final results
           if (isFinal && transcript.includes(WAKE_WORD)) {
             awaitingCommand.current = true;
             setCommandListening(true);
-
-            const afterWake = transcript
-              .split(WAKE_WORD)
-              .slice(1)
-              .join(WAKE_WORD)
-              .trim();
-
+            const afterWake = transcript.split(WAKE_WORD).slice(1).join(WAKE_WORD).trim();
             if (afterWake) {
-              // "Alpha do something" — command inline
               commandBuffer.current = afterWake;
               clearWakeOnlyTimer();
               clearSilenceTimer();
               silenceTimer.current = setTimeout(() => resetCommandState(commandBuffer.current.trim()), COMMAND_SILENCE_MS);
             } else {
-              // FIX 3: "Alpha" alone — wait for next utterance
               clearSilenceTimer();
               wakeOnlyTimer.current = setTimeout(() => resetCommandState(), WAKE_ONLY_TIMEOUT_MS);
             }
           }
         } else {
-          // Command mode — collect final words
           if (isFinal) {
             const spoken = result[0].transcript.trim();
             if (spoken) {
@@ -368,19 +345,13 @@ function useWakeWord(
       }
     };
 
-    rec.onend = () => {
-      if (!enabled) return;
-      try { rec.start(); } catch (_) {}
-    };
-
+    rec.onend = () => { if (enabled) try { rec.start(); } catch (_) {} };
     rec.onerror = (e: SpeechRecognitionErrorEvent) => {
       if (e.error === 'no-speech' || e.error === 'aborted') return;
       console.warn('Wake word error:', e.error);
     };
 
-    if (enabled) {
-      try { rec.start(); setWakeListening(true); } catch (_) {}
-    }
+    if (enabled) { try { rec.start(); setWakeListening(true); } catch (_) {} }
 
     return () => {
       rec.onend = null;
@@ -400,7 +371,7 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([{
     id: '0',
     role: 'assistant',
-    content: 'ALPHA ONLINE. Wake word active - just say "Alpha" followed by your command, or say "Alpha" alone and then speak your command. Ask me about market conditions, price levels, technicals, news, or trade setups.',
+    content: 'ALPHA ONLINE. Wake word active - say "Alpha" followed by your command. For hands-free use across tabs, click POP OUT to open the always-on listener window.',
     timestamp: new Date(),
     model: 'claude-sonnet-4-6',
   }]);
@@ -414,16 +385,39 @@ export default function Home() {
   const [activeModel, setActiveModel]   = useState<string>('claude-sonnet-4-6');
   const [lastHadImage, setLastHadImage] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
+  const [popupOpen, setPopupOpen]       = useState(false);
   const inputRef       = useRef<HTMLTextAreaElement>(null);
   const mediaRecRef    = useRef<MediaRecorder | null>(null);
   const audioChunks    = useRef<Blob[]>([]);
   const currentAudio   = useRef<HTMLAudioElement | null>(null);
   const sendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
+  const popupRef       = useRef<Window | null>(null);
+  const channelRef     = useRef<BroadcastChannel | null>(null);
 
   useEffect(() => {
     fetch(`${BACKEND}/health`)
       .then(r => r.ok ? setBackendStatus('ok') : setBackendStatus('offline'))
       .catch(() => setBackendStatus('offline'));
+  }, []);
+
+  // BroadcastChannel: receive commands from popup listener
+  useEffect(() => {
+    const ch = new BroadcastChannel(CHANNEL_NAME);
+    channelRef.current = ch;
+    ch.onmessage = (e) => {
+      if (e.data?.type === 'command' && e.data.text) {
+        sendMessageRef.current(e.data.text);
+      }
+    };
+    return () => { ch.close(); channelRef.current = null; };
+  }, []);
+
+  // Broadcast busy state to popup so it pauses during TTS/loading
+  const isBusyRef = useRef(false);
+  const broadcastBusy = useCallback((val: boolean) => {
+    if (isBusyRef.current === val) return;
+    isBusyRef.current = val;
+    channelRef.current?.postMessage({ type: 'busy', value: val });
   }, []);
 
   const playTTS = useCallback(async (text: string) => {
@@ -523,11 +517,35 @@ export default function Home() {
   useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
 
   const isBusy = loading || speaking || listening || capturing;
+
+  // Keep popup in sync with busy state
+  useEffect(() => { broadcastBusy(isBusy); }, [isBusy, broadcastBusy]);
+
   const { wakeListening, commandListening } = useWakeWord(
     wakeEnabled,
     useCallback((text: string) => { sendMessageRef.current(text); }, []),
     isBusy,
   );
+
+  // Pop-out listener window
+  const openPopup = () => {
+    if (popupRef.current && !popupRef.current.closed) {
+      popupRef.current.focus();
+      return;
+    }
+    const w = window.open(
+      '/listener',
+      'alpha-listener',
+      'width=220,height=300,toolbar=0,menubar=0,scrollbars=0,resizable=0,alwaysOnTop=1'
+    );
+    if (w) {
+      popupRef.current = w;
+      setPopupOpen(true);
+      const poll = setInterval(() => {
+        if (w.closed) { clearInterval(poll); setPopupOpen(false); popupRef.current = null; }
+      }, 1000);
+    }
+  };
 
   const toggleMic = useCallback(async () => {
     if (listening) { mediaRecRef.current?.stop(); return; }
@@ -612,6 +630,27 @@ export default function Home() {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <ModelBadge model={activeModel} hasImage={lastHadImage} />
+
+          {/* POP OUT button */}
+          <button
+            onClick={openPopup}
+            title="Open always-on listener popup (works across all tabs)"
+            style={{
+              background: popupOpen ? 'rgba(0,210,200,0.12)' : 'rgba(0,210,200,0.05)',
+              border: `1px solid ${popupOpen ? 'rgba(0,210,200,0.5)' : 'rgba(0,210,200,0.2)'}`,
+              borderRadius: 4, padding: '4px 10px', cursor: 'pointer',
+              fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
+              color: popupOpen ? 'var(--primary)' : 'var(--text-muted)',
+              display: 'flex', alignItems: 'center', gap: 5,
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+              <polyline points="15 3 21 3 21 9" />
+              <line x1="10" y1="14" x2="21" y2="3" />
+            </svg>
+            {popupOpen ? 'LISTENER ON' : 'POP OUT'}
+          </button>
 
           <button
             onClick={() => setWakeEnabled(v => !v)}
@@ -714,6 +753,21 @@ export default function Home() {
               border: '1px solid rgba(80,160,255,0.15)', borderRadius: 4, padding: '4px 10px',
             }}>
               SAY &quot;ALPHA ...&quot; TO ACTIVATE
+            </div>
+          )}
+
+          {/* Pop out hint */}
+          {!popupOpen && (
+            <div
+              onClick={openPopup}
+              style={{
+                fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.08em',
+                color: 'var(--text-faint)', textAlign: 'center', cursor: 'pointer',
+                border: '1px dashed rgba(0,210,200,0.15)', borderRadius: 4, padding: '5px 10px',
+                maxWidth: 180,
+              }}
+            >
+              <span style={{ color: 'var(--primary)' }}>POP OUT</span> for cross-tab listening
             </div>
           )}
 
