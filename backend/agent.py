@@ -14,23 +14,29 @@ logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 CLAUDE_MODEL      = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
-# ─── Claude triggers (trading/financial only) ────────────────────────────────────────────
+# ─── Claude triggers ───────────────────────────────────────────────────────────────────────────────
+# Any message matching these goes to Claude (which has Tavily web search).
+# Groq is fast but offline — it cannot look up live prices, news, or research.
 CLAUDE_TRIGGERS = [
+    # ─ Futures & instruments ─────────────────────────────────────────────────────
     "mnq", "mes", "nq futures", "es futures",
     "nasdaq futures", "s&p futures", "sp500", "spx", "ndx",
     "micro nasdaq", "micro s&p", "e-mini",
+    # ─ Trade management ──────────────────────────────────────────────────────
     "trade setup", "trade plan", "entry zone", "exit zone",
     "long setup", "short setup", "going long", "going short",
     "buy stop", "sell stop", "buy limit", "sell limit",
     "stop loss", "take profit", "trailing stop",
     "position size", "position sizing", "risk reward", "r:r", "r/r",
     "p&l", "pnl", "unrealized", "drawdown", "max loss",
+    # ─ Technical indicators ───────────────────────────────────────────────────
     "vwap", "rsi", "macd", "ema", "sma", "moving average",
     "bollinger", "stochastic", "atr", "ichimoku",
     "support level", "resistance level", "key level",
+    # ─ ICT concepts ──────────────────────────────────────────────────────────
     "fvg", "ifvg", "fair value gap", "inverse fvg",
     "order block", "ob", "breaker block",
     "smt", "smt divergence", "smart money",
@@ -41,22 +47,40 @@ CLAUDE_TRIGGERS = [
     "breakout", "breakdown", "fakeout",
     "trend line", "trendline", "channel", "wedge", "flag pattern",
     "premium", "discount", "equilibrium",
+    # ─ Sessions & timing ──────────────────────────────────────────────────
     "pre-market", "premarket", "after hours", "afterhours",
     "rth", "eth", "globex", "overnight session",
     "market open", "market close", "power hour",
     "gap up", "gap down", "opening range",
+    # ─ Economic events ─────────────────────────────────────────────────────
     "fomc", "federal reserve", "fed meeting", "rate decision",
     "cpi report", "pce report", "nfp", "jobs report",
     "gdp report", "earnings report", "economic calendar",
+    # ─ Market analysis ──────────────────────────────────────────────────────
     "futures price", "futures level", "live price",
     "market outlook", "market analysis", "technical analysis",
     "price action", "price level",
     "bias", "bullish bias", "bearish bias",
     "1h", "4h", "15m", "5m", "1m", "3m",
     "timeframe", "htf", "ltf",
+    # ─ Live data / news / research (Groq can't answer these) ──────────────
+    "news", "latest", "today", "right now", "current", "live",
+    "what happened", "what's happening", "what is happening",
+    "breaking", "update", "updates", "headline", "headlines",
+    "political", "politics", "election", "president", "congress", "senate",
+    "tariff", "tariffs", "trade war", "sanctions",
+    "inflation", "interest rate", "rate hike", "rate cut",
+    "recession", "gdp", "unemployment", "jobs",
+    "stock market", "market today", "market news",
+    "crypto", "bitcoin", "ethereum",
+    "oil price", "gold price", "dollar", "dxy",
+    "research", "data", "report", "study", "statistics",
+    "search", "look up", "find out", "tell me about",
+    "what is", "who is", "where is", "when is", "how much",
+    "weather", "forecast",
 ]
 
-# ─── System prompts ──────────────────────────────────────────────────────
+# ─── System prompts ────────────────────────────────────────────────────────────────────
 
 ICT_STRATEGY = """
 == YOUR TRADER'S STRATEGY: PB BLAKE ICT MODEL ==
