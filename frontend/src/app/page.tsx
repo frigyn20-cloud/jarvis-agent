@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import ChatWindow from '@/components/ChatWindow';
 
 const BACKEND = 'http://localhost:8000';
+const TTS_PLAYBACK_RATE = 1.15; // Slightly faster than default — adjust to taste (1.0–1.5)
 
 export interface Message {
   id: string;
@@ -206,7 +207,6 @@ export default function Home() {
   const mediaRecRef    = useRef<MediaRecorder | null>(null);
   const audioChunks    = useRef<Blob[]>([]);
   const currentAudio   = useRef<HTMLAudioElement | null>(null);
-  // ref so onstop callback always has the latest sendMessage
   const sendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
 
   useEffect(() => {
@@ -233,6 +233,7 @@ export default function Home() {
       const blob  = await res.blob();
       const url   = URL.createObjectURL(blob);
       const audio = new Audio(url);
+      audio.playbackRate = TTS_PLAYBACK_RATE; // ← speed control
       currentAudio.current = audio;
       audio.onended = () => { setSpeaking(false); URL.revokeObjectURL(url); };
       audio.onerror = () => { setSpeaking(false); };
@@ -275,7 +276,6 @@ export default function Home() {
         timestamp: new Date(),
         model,
       }]);
-      // Auto-play voice response
       await playTTS(reply);
     } catch {
       setMessages(prev => [...prev, {
@@ -290,7 +290,6 @@ export default function Home() {
     }
   }, [input, loading, messages, playTTS]);
 
-  // Keep ref in sync so onstop always calls latest version
   useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
 
   // ─── STT: record → transcribe → AUTO-SEND ────────────────────────────────
@@ -320,7 +319,6 @@ export default function Home() {
           const res  = await fetch(`${BACKEND}/voice/stt`, { method: 'POST', body: formData });
           const data = await res.json();
           if (data.text && data.text.trim()) {
-            // ✅ AUTO-SEND directly — no typing needed
             await sendMessageRef.current(data.text.trim());
           }
         } catch (e) {
@@ -497,7 +495,6 @@ export default function Home() {
                   resize: 'none', minHeight: 24, maxHeight: 120, overflowY: 'auto', lineHeight: 1.5,
                 }}
               />
-              {/* Mic button */}
               <MicButton
                 listening={listening}
                 onClick={toggleMic}
