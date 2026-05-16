@@ -503,7 +503,7 @@ export default function Home() {
     ? 'WAKE ACTIVE'
     : 'STANDBY';
 
-  const statusColor = capturing
+  const statusColor: string = capturing
     ? '#ffd700'
     : commandListening
     ? '#50dc78'
@@ -547,7 +547,6 @@ export default function Home() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <ModelBadge model={activeModel} hasImage={lastHadImage} />
 
-          {/* Wake word toggle */}
           <button
             onClick={() => setWakeEnabled(v => !v)}
             title={wakeEnabled ? 'Disable wake word' : 'Enable wake word ("Alpha")'}
@@ -632,7 +631,6 @@ export default function Home() {
             <div style={{ color: 'var(--text-faint)' }}>MNQ · MES FUTURES</div>
           </div>
 
-          {/* Wake word hint — fixed: single padding property */}
           {wakeListening && !commandListening && !isBusy && (
             <div style={{
               fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
