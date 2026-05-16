@@ -7,6 +7,7 @@ from langgraph.prebuilt import ToolNode
 from typing import TypedDict, Annotated
 import operator
 from tools import ALL_TOOLS, CONFIRM_REQUIRED_TOOLS
+from trading_state import get_session
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -16,65 +17,100 @@ GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 CLAUDE_MODEL      = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
-# Only these EXACT phrases trigger Claude
-# Rule: must be a specific trading/financial term, NOT generic words
+# ─── Claude triggers (trading/financial only) ────────────────────────────────
 CLAUDE_TRIGGERS = [
-    # instruments
     "mnq", "mes", "nq futures", "es futures",
     "nasdaq futures", "s&p futures", "sp500", "spx", "ndx",
     "micro nasdaq", "micro s&p", "e-mini",
-    # trading actions
     "trade setup", "trade plan", "entry zone", "exit zone",
     "long setup", "short setup", "going long", "going short",
     "buy stop", "sell stop", "buy limit", "sell limit",
     "stop loss", "take profit", "trailing stop",
     "position size", "position sizing", "risk reward", "r:r", "r/r",
     "p&l", "pnl", "unrealized", "drawdown", "max loss",
-    # technical analysis
     "vwap", "rsi", "macd", "ema", "sma", "moving average",
     "bollinger", "stochastic", "atr", "ichimoku",
     "support level", "resistance level", "key level",
-    "breakout", "breakdown", "fakeout", "liquidity grab",
-    "order block", "fair value gap", "fvg", "imbalance",
-    "market structure", "higher high", "lower low",
+    "fvg", "ifvg", "fair value gap", "inverse fvg",
+    "order block", "ob", "breaker block",
+    "smt", "smt divergence", "smart money",
+    "market structure", "higher high", "lower low", "higher low", "lower high",
+    "hh", "hl", "lh", "ll",
+    "liquidity", "liquidity grab", "liquidity sweep", "swing high", "swing low",
+    "sweep", "swept",
+    "breakout", "breakdown", "fakeout",
     "trend line", "trendline", "channel", "wedge", "flag pattern",
-    "head and shoulders", "double top", "double bottom",
-    "candlestick pattern", "doji", "engulfing", "pin bar", "hammer",
-    "volume profile", "point of control", "poc", "value area",
-    # market session
+    "premium", "discount", "equilibrium",
     "pre-market", "premarket", "after hours", "afterhours",
     "rth", "eth", "globex", "overnight session",
     "market open", "market close", "power hour",
     "gap up", "gap down", "opening range",
-    # macro / calendar
     "fomc", "federal reserve", "fed meeting", "rate decision",
     "cpi report", "pce report", "nfp", "jobs report",
     "gdp report", "earnings report", "economic calendar",
-    # price/market data (must be specific)
-    "futures price", "futures level", "current price mnq", "live price",
+    "futures price", "futures level", "live price",
     "market outlook", "market analysis", "technical analysis",
     "price action", "price level",
+    "bias", "bullish bias", "bearish bias",
+    "1h", "4h", "15m", "5m", "1m", "3m",
+    "timeframe", "htf", "ltf",
 ]
 
-# System prompts
-ANALYSIS_PROMPT = """
-You are Alpha, an AI-powered trading assistant specialized in US equity index futures - MNQ (Micro Nasdaq-100) and MES (Micro E-mini S&P 500).
+# ─── System prompts ──────────────────────────────────────────────────────────
+
+ICT_STRATEGY = """
+== YOUR TRADER'S STRATEGY: PB BLAKE ICT MODEL ==
+
+This is a mechanical ICT model. You know these rules precisely.
+
+STEP 1 — ESTABLISH HTF BIAS (1H + 4H CHARTS)
+- BULLISH bias: price makes Higher Highs + Higher Lows AND respects bullish FVGs (bounces from them) AND disrespects bearish FVGs (breaks through them)
+- BEARISH bias: price makes Lower Lows + Lower Highs AND respects bearish FVGs AND disrespects bullish FVGs
+- ALSO check for high timeframe SMT divergence between correlated instruments (ES vs NQ) as additional bias confirmation
+
+STEP 2 — POST OPEN FVG DRAW (after 9:30 AM ET)
+- BEARISH bias → wait for price to reach a 15m-1h FVG ABOVE current price (premium zone)
+- BULLISH bias → wait for price to reach a 15m-1h FVG BELOW current price (discount zone)
+- If this FVG was previously touched: the associated swing high (bearish) or swing low (bullish) MUST be swept before entry is valid
+
+STEP 3 — IDENTIFY HIGHEST TIMEFRAME iFVG (1m-5m)
+- From the 15m-1h FVG that was hit, scan 1m-5m charts for the highest timeframe inverse FVG
+- PRIORITY RULE: If you see a 3m iFVG but a 5m FVG has NOT yet been inversed — WAIT for the 5m to inverse first
+- The iFVG direction MUST align with HTF bias
+- SMT divergence at this level = additional confirmation (optional but adds conviction)
+
+STEP 4 — EXECUTE
+- Entry triggers when the highest available timeframe iFVG forms in bias direction
+- Optional: confirm with SMT divergence
+
+KEY CONCEPTS:
+- FVG = Fair Value Gap (3-candle imbalance)
+- iFVG = Inverse FVG (a FVG that was later violated/inverted, now acts as support/resistance)
+- SMT = Smart Money Technique divergence (e.g. ES makes new high but NQ does not = bearish divergence)
+- Premium zone = above current price / above equilibrium
+- Discount zone = below current price / below equilibrium
+- Sweeping a swing = price briefly takes out the swing high/low (liquidity grab) before reversing
+"""
+
+ANALYSIS_PROMPT = f"""
+You are Alpha, an AI-powered trading assistant specialized in US equity index futures — MNQ (Micro Nasdaq-100) and MES (Micro E-mini S&P 500).
 
 Personality: precise, confident, professional. Speak like a seasoned trader. Lead with data. Be concise.
 
 Tools available: web_search, calculator, get_time, summarize_text, remember, recall, open_url.
 
-Rules:
+{ICT_STRATEGY}
+
+GENERAL RULES:
 - ALWAYS use web_search for current prices, news, live data, economic releases.
 - Use calculator for P&L, position sizing, R:R math.
-- Structure level answers: Trend -> Key Levels -> Bias -> What to watch.
+- When asked about a setup: walk through Steps 1→4 of the ICT model.
 - Never give financial advice. Present analysis only.
 - Lead with data. Skip filler.
 """
 
 CHAT_PROMPT = """
 You are Alpha, a sharp and helpful AI assistant. Answer the user's question directly and naturally.
-
 - For general knowledge questions: answer clearly and concisely.
 - For casual chat: be warm and brief.
 - Do NOT bring up trading, markets, or financial topics unless the user asks.
@@ -83,7 +119,6 @@ You are Alpha, a sharp and helpful AI assistant. Answer the user's question dire
 
 
 def needs_claude(message: str) -> bool:
-    """Return True only if the message contains a specific trading/financial term."""
     msg_lower = message.lower()
     return any(trigger in msg_lower for trigger in CLAUDE_TRIGGERS)
 
@@ -125,10 +160,17 @@ def agent_node(state: AgentState):
     used_fallback = False
     response = None
 
+    # Inject current session state into the system prompt
+    session = get_session()
+    session_context = f"""
+
+== CURRENT SESSION STATE ==
+{session.checklist_summary()}
+"""
+
     if use_claude:
-        # Claude: full tools + trading analysis prompt
         try:
-            system = SystemMessage(content=ANALYSIS_PROMPT)
+            system = SystemMessage(content=ANALYSIS_PROMPT + session_context)
             llm = get_claude_llm().bind_tools(ALL_TOOLS)
             response = llm.invoke([system] + messages_in)
             routed_to = "claude"
@@ -139,10 +181,9 @@ def agent_node(state: AgentState):
             use_claude = False
 
     if not use_claude:
-        # Groq: no tools, lightweight prompt, fast
         try:
             system = SystemMessage(content=CHAT_PROMPT)
-            llm = get_groq_llm()  # no .bind_tools() - fast
+            llm = get_groq_llm()
             response = llm.invoke([system] + messages_in)
             routed_to = "groq"
             logger.info(f"[Alpha] GROQ -> {GROQ_MODEL} | {last_human[:60]}")
