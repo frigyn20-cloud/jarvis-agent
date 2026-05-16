@@ -15,6 +15,11 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
+# Model selection — change CLAUDE_MODEL in .env to switch
+# claude-haiku-4-5   = cheapest (~50 credits/msg) → use during dev
+# claude-sonnet-4-5  = best (~500 credits/msg)   → use in production
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
+
 SYSTEM_PROMPT = """
 You are Alpha, an AI-powered trading assistant specialized in US equity index futures — specifically MNQ (Micro Nasdaq-100) and MES (Micro E-mini S&P 500).
 
@@ -50,13 +55,13 @@ Rules:
 
 
 def get_primary_llm():
-    """Claude Sonnet 4.6 — primary reasoning brain."""
+    """Claude — primary reasoning brain."""
     if not ANTHROPIC_API_KEY:
         raise ValueError("ANTHROPIC_API_KEY not set in backend/.env")
     from langchain_anthropic import ChatAnthropic
     return ChatAnthropic(
         api_key=ANTHROPIC_API_KEY,
-        model="claude-sonnet-4-5",
+        model=CLAUDE_MODEL,
         temperature=0.2,
         max_tokens=4096,
     )
@@ -67,11 +72,7 @@ def get_fallback_llm():
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY not set in backend/.env")
     from langchain_groq import ChatGroq
-    return ChatGroq(
-        api_key=GROQ_API_KEY,
-        model=GROQ_MODEL,
-        temperature=0.2,
-    )
+    return ChatGroq(api_key=GROQ_API_KEY, model=GROQ_MODEL, temperature=0.2)
 
 
 class AgentState(TypedDict):
@@ -85,11 +86,10 @@ def agent_node(state: AgentState):
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
     used_fallback = False
 
-    # Try Claude first
     try:
         llm = get_primary_llm().bind_tools(ALL_TOOLS)
         response = llm.invoke(messages)
-        logger.info("[Alpha] Using Claude Sonnet 4.6")
+        logger.info(f"[Alpha] Using {CLAUDE_MODEL}")
     except Exception as claude_err:
         logger.warning(f"[Alpha] Claude failed: {claude_err} — falling back to Groq")
         used_fallback = True
@@ -100,7 +100,6 @@ def agent_node(state: AgentState):
         except Exception as groq_err:
             err = str(groq_err)
             if "tool_use_failed" in err or "failed_generation" in err:
-                # Last resort: answer without tools
                 fallback = get_fallback_llm()
                 fp = SystemMessage(content=SYSTEM_PROMPT + "\n\nNOTE: Tool calling unavailable. Answer from training knowledge.")
                 response = fallback.invoke([fp] + state["messages"])
@@ -177,9 +176,11 @@ async def run_agent(message: str, history: list[dict]) -> dict:
             for tc in msg.tool_calls:
                 tool_calls_log.append({"tool": tc["name"], "input": tc.get("args", {})})
 
+    model_used = "groq-fallback" if result.get("used_fallback") else CLAUDE_MODEL
+
     return {
         "reply": reply,
         "tool_calls": tool_calls_log,
         "pending_confirmation": result.get("pending_confirmation"),
-        "model": "groq-fallback" if result.get("used_fallback") else "claude-sonnet-4-6",
+        "model": model_used,
     }
