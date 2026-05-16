@@ -1,10 +1,15 @@
 fastapi
 uvicorn[standard]
 python-dotenv
+# Primary LLM
+langchain-anthropic
+# Fallback LLM
 langchain-groq
+# Core
 langchain-core
 langchain-community
 langgraph
 numexpr
+# Search
 ddgs
 tavily-python
