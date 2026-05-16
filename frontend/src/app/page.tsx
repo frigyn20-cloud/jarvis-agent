@@ -5,6 +5,9 @@ import ChatWindow from '@/components/ChatWindow';
 
 const BACKEND = 'http://localhost:8000';
 const TTS_PLAYBACK_RATE = 1.15;
+const WAKE_WORD = 'alpha';
+// How many ms of silence after wake word before we stop recording the command
+const COMMAND_SILENCE_MS = 2000;
 
 // Phrases that trigger automatic screen capture
 const SCREEN_TRIGGERS = [
@@ -29,7 +32,7 @@ export interface Message {
   hasImage?: boolean;
 }
 
-function AlphaOrb({ speaking, listening }: { speaking: boolean; listening: boolean }) {
+function AlphaOrb({ speaking, listening, wakeListening }: { speaking: boolean; listening: boolean; wakeListening: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef   = useRef<number>(0);
 
@@ -55,10 +58,11 @@ function AlphaOrb({ speaking, listening }: { speaking: boolean; listening: boole
       ctx.clearRect(0, 0, W, H);
       const spk = speaking;
       const lst = listening;
-      const intensity = spk ? 1.5 : lst ? 1.2 : 1.0;
-      const wobble    = spk ? 0.08 : lst ? 0.05 : 0.025;
+      const wk  = wakeListening && !lst && !spk;
+      const intensity = spk ? 1.5 : lst ? 1.2 : wk ? 0.7 : 1.0;
+      const wobble    = spk ? 0.08 : lst ? 0.05 : wk ? 0.015 : 0.025;
 
-      const glowColor = lst ? '80,220,120' : '0,210,200';
+      const glowColor = lst ? '80,220,120' : wk ? '80,160,255' : '0,210,200';
       const outerGlow = ctx.createRadialGradient(cx, cy, 55, cx, cy, 105);
       outerGlow.addColorStop(0, `rgba(${glowColor},${0.18 * intensity})`);
       outerGlow.addColorStop(1, `rgba(${glowColor},0)`);
@@ -75,8 +79,8 @@ function AlphaOrb({ speaking, listening }: { speaking: boolean; listening: boole
           const x    = cx + Math.cos(a) * r;
           const y    = cy + Math.sin(a) * r * 0.38;
           const op   = p.opacity * ((spk || lst) ? Math.min(1, 0.6 + Math.abs(Math.sin(t * 0.003 + i))) : 1);
-          const g    = lst ? 200 + ri * 10 : 180 + ri * 20;
-          const b_   = lst ? 120 + ri * 10 : 180 + ri * 10;
+          const g    = lst ? 200 + ri * 10 : wk ? 140 + ri * 15 : 180 + ri * 20;
+          const b_   = lst ? 120 + ri * 10 : wk ? 220 + ri * 10 : 180 + ri * 10;
           ctx.beginPath(); ctx.arc(x, y, p.size, 0, Math.PI * 2);
           ctx.fillStyle = `rgba(0,${g},${b_},${op})`;
           ctx.fill();
@@ -88,6 +92,10 @@ function AlphaOrb({ speaking, listening }: { speaking: boolean; listening: boole
         innerGrad.addColorStop(0, `rgba(80,255,120,${0.55 * intensity})`);
         innerGrad.addColorStop(0.5, `rgba(0,200,100,${0.35 * intensity})`);
         innerGrad.addColorStop(1, `rgba(0,80,40,${0.2 * intensity})`);
+      } else if (wk) {
+        innerGrad.addColorStop(0, `rgba(80,160,255,${0.35 * intensity})`);
+        innerGrad.addColorStop(0.5, `rgba(0,100,200,${0.2 * intensity})`);
+        innerGrad.addColorStop(1, `rgba(0,40,100,${0.1 * intensity})`);
       } else {
         innerGrad.addColorStop(0, `rgba(0,255,240,${0.55 * intensity})`);
         innerGrad.addColorStop(0.5, `rgba(0,180,175,${0.35 * intensity})`);
@@ -98,7 +106,7 @@ function AlphaOrb({ speaking, listening }: { speaking: boolean; listening: boole
 
       const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 14);
       coreGrad.addColorStop(0, `rgba(255,255,255,${0.9 * intensity})`);
-      coreGrad.addColorStop(1, lst ? 'rgba(80,255,120,0)' : 'rgba(0,210,200,0)');
+      coreGrad.addColorStop(1, lst ? 'rgba(80,255,120,0)' : wk ? 'rgba(80,160,255,0)' : 'rgba(0,210,200,0)');
       ctx.beginPath(); ctx.arc(cx, cy, 14, 0, Math.PI * 2);
       ctx.fillStyle = coreGrad; ctx.fill();
 
@@ -112,12 +120,20 @@ function AlphaOrb({ speaking, listening }: { speaking: boolean; listening: boole
         ctx.lineWidth = 1; ctx.stroke();
       }
 
+      // Subtle slow pulse when wake-listening
+      if (wk) {
+        const sr = 52 + Math.sin(t * 0.0015) * 4;
+        ctx.beginPath(); ctx.arc(cx, cy, sr, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(80,160,255,${0.15 + Math.sin(t * 0.002) * 0.08})`;
+        ctx.lineWidth = 1; ctx.stroke();
+      }
+
       animRef.current = requestAnimationFrame(draw);
     }
 
     animRef.current = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(animRef.current);
-  }, [speaking, listening]);
+  }, [speaking, listening, wakeListening]);
 
   return <canvas ref={canvasRef} width={220} height={220} style={{ display: 'block' }} />;
 }
@@ -213,7 +229,6 @@ async function captureScreen(): Promise<string | null> {
 
     stream.getTracks().forEach(t => t.stop());
 
-    // Return base64 PNG without the data:image/png;base64, prefix
     return canvas.toDataURL('image/png').split(',')[1];
   } catch (e) {
     console.error('Screen capture failed:', e);
@@ -221,11 +236,117 @@ async function captureScreen(): Promise<string | null> {
   }
 }
 
+// ─── Wake word hook ─────────────────────────────────────────────────────────────────
+// Uses Web Speech API continuous mode to watch for WAKE_WORD, then records
+// the rest of the utterance as a command and fires onCommand(text).
+function useWakeWord(
+  enabled: boolean,
+  onCommand: (text: string) => void,
+  busy: boolean,  // don't activate when loading / speaking / already recording
+) {
+  const recognitionRef  = useRef<SpeechRecognition | null>(null);
+  const commandBuffer   = useRef<string>('');
+  const awaitingCommand = useRef(false);
+  const silenceTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [wakeListening, setWakeListening] = useState(false);
+  const [commandListening, setCommandListening] = useState(false);
+
+  const clearSilenceTimer = () => {
+    if (silenceTimer.current) { clearTimeout(silenceTimer.current); silenceTimer.current = null; }
+  };
+
+  const flushCommand = useCallback(() => {
+    clearSilenceTimer();
+    const cmd = commandBuffer.current.trim();
+    commandBuffer.current = '';
+    awaitingCommand.current = false;
+    setCommandListening(false);
+    if (cmd) onCommand(cmd);
+  }, [onCommand]);
+
+  useEffect(() => {
+    const SpeechRecognition =
+      (window as unknown as { SpeechRecognition?: typeof globalThis.SpeechRecognition; webkitSpeechRecognition?: typeof globalThis.SpeechRecognition })
+        .SpeechRecognition ||
+      (window as unknown as { webkitSpeechRecognition?: typeof globalThis.SpeechRecognition })
+        .webkitSpeechRecognition;
+
+    if (!SpeechRecognition) return;
+
+    const rec = new SpeechRecognition();
+    rec.continuous      = true;
+    rec.interimResults  = true;
+    rec.lang            = 'en-US';
+    recognitionRef.current = rec;
+
+    rec.onresult = (event: SpeechRecognitionEvent) => {
+      if (busy) return;
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result    = event.results[i];
+        const transcript = result[0].transcript.toLowerCase().trim();
+        const isFinal   = result.isFinal;
+
+        if (!awaitingCommand.current) {
+          // Looking for wake word
+          if (transcript.includes(WAKE_WORD)) {
+            awaitingCommand.current = true;
+            setCommandListening(true);
+            // Strip wake word and everything before it, keep the rest as start of command
+            const afterWake = transcript.split(WAKE_WORD).slice(1).join(WAKE_WORD).trim();
+            if (afterWake) {
+              commandBuffer.current = afterWake;
+              clearSilenceTimer();
+              silenceTimer.current = setTimeout(flushCommand, COMMAND_SILENCE_MS);
+            }
+          }
+        } else {
+          // Accumulating the command after the wake word
+          if (isFinal) {
+            commandBuffer.current += ' ' + result[0].transcript.trim();
+            clearSilenceTimer();
+            silenceTimer.current = setTimeout(flushCommand, COMMAND_SILENCE_MS);
+          }
+        }
+      }
+    };
+
+    rec.onend = () => {
+      if (!enabled) return;
+      // Auto-restart — Web Speech API stops after ~60s of silence
+      try { rec.start(); } catch (_) { /* already started */ }
+    };
+
+    rec.onerror = (e: SpeechRecognitionErrorEvent) => {
+      if (e.error === 'no-speech' || e.error === 'aborted') return;
+      console.warn('Wake word recognition error:', e.error);
+    };
+
+    if (enabled) {
+      try { rec.start(); setWakeListening(true); } catch (_) { /* already started */ }
+    }
+
+    return () => {
+      rec.onend = null;
+      try { rec.stop(); } catch (_) {}
+      setWakeListening(false);
+      setCommandListening(false);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled]);
+
+  // Update busy ref so the callback always sees fresh value without restarting
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+
+  return { wakeListening, commandListening };
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '0', role: 'assistant',
-      content: "ALPHA ONLINE. Trading assistant initialized for MNQ & MES futures. Ask me about market conditions, price levels, technicals, news, or trade setups. Say 'look at my screen' to share your chart.",
+      content: "ALPHA ONLINE. Wake word active — just say \"Alpha\" followed by your command. Ask me about market conditions, price levels, technicals, news, or trade setups. Say 'look at my screen' to share your chart.",
       timestamp: new Date(), model: 'claude-sonnet-4-6',
     },
   ]);
@@ -235,6 +356,7 @@ export default function Home() {
   const [listening, setListening] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [wakeEnabled, setWakeEnabled]   = useState(true);
   const [activeModel, setActiveModel]   = useState<string>('claude-sonnet-4-6');
   const [lastHadImage, setLastHadImage] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
@@ -279,7 +401,6 @@ export default function Home() {
 
     let imageBase64: string | null = null;
 
-    // Auto-capture screen if user asked to look at it
     if (isScreenRequest(text)) {
       setCapturing(true);
       imageBase64 = await captureScreen();
@@ -336,6 +457,14 @@ export default function Home() {
 
   useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
 
+  // ── Wake word ──────────────────────────────────────────────────────────────
+  const isBusy = loading || speaking || listening || capturing;
+  const { wakeListening, commandListening } = useWakeWord(
+    wakeEnabled,
+    useCallback((text: string) => { sendMessageRef.current(text); }, []),
+    isBusy,
+  );
+
   const toggleMic = useCallback(async () => {
     if (listening) { mediaRecRef.current?.stop(); return; }
     try {
@@ -368,8 +497,33 @@ export default function Home() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   };
 
-  const statusLabel = capturing ? 'CAPTURING...' : listening ? 'LISTENING...' : speaking ? 'SPEAKING...' : loading ? 'PROCESSING...' : 'STANDBY';
-  const statusColor = capturing ? '#ffd700' : listening ? '#50dc78' : speaking ? 'var(--accent)' : 'var(--primary)';
+  const statusLabel = capturing
+    ? 'CAPTURING...'
+    : commandListening
+    ? 'COMMAND...'
+    : listening
+    ? 'LISTENING...'
+    : speaking
+    ? 'SPEAKING...'
+    : loading
+    ? 'PROCESSING...'
+    : wakeListening
+    ? 'WAKE ACTIVE'
+    : 'STANDBY';
+
+  const statusColor = capturing
+    ? '#ffd700'
+    : commandListening
+    ? '#50dc78'
+    : listening
+    ? '#50dc78'
+    : speaking
+    ? 'var(--accent)'
+    : loading
+    ? 'var(--primary)'
+    : wakeListening
+    ? 'rgba(80,160,255,0.9)'
+    : 'var(--primary)';
 
   return (
     <div style={{
@@ -400,6 +554,26 @@ export default function Home() {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <ModelBadge model={activeModel} hasImage={lastHadImage} />
+
+          {/* Wake word toggle */}
+          <button
+            onClick={() => setWakeEnabled(v => !v)}
+            title={wakeEnabled ? 'Disable wake word' : 'Enable wake word ("Alpha")'}
+            style={{
+              background: wakeEnabled ? 'rgba(80,160,255,0.08)' : 'rgba(255,68,102,0.08)',
+              border: `1px solid ${wakeEnabled ? 'rgba(80,160,255,0.3)' : 'rgba(255,68,102,0.25)'}`,
+              borderRadius: 4, padding: '4px 10px', cursor: 'pointer',
+              fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
+              color: wakeEnabled ? '#50a0ff' : 'var(--red)',
+              display: 'flex', alignItems: 'center', gap: 5,
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
+            </svg>
+            WAKE {wakeEnabled ? 'ON' : 'OFF'}
+          </button>
 
           <button
             onClick={() => { setVoiceEnabled(v => !v); if (speaking && currentAudio.current) { currentAudio.current.pause(); setSpeaking(false); } }}
@@ -455,7 +629,7 @@ export default function Home() {
             <div style={{ position: 'relative', padding: 12 }}>
               <HudCorner pos="tl" /><HudCorner pos="tr" />
               <HudCorner pos="bl" /><HudCorner pos="br" />
-              <AlphaOrb speaking={speaking} listening={listening} />
+              <AlphaOrb speaking={speaking} listening={listening || commandListening} wakeListening={wakeListening && !commandListening && !listening} />
             </div>
           </div>
 
@@ -466,8 +640,20 @@ export default function Home() {
             <div style={{ color: 'var(--text-faint)' }}>MNQ · MES FUTURES</div>
           </div>
 
+          {/* Wake word hint */}
+          {wakeListening && !commandListening && !isBusy && (
+            <div style={{
+              fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
+              color: 'rgba(80,160,255,0.6)', textAlign: 'center', padding: '0 16px',
+              border: '1px solid rgba(80,160,255,0.15)', borderRadius: 4,
+              padding: '4px 10px',
+            }}>
+              SAY "ALPHA ..." TO ACTIVATE
+            </div>
+          )}
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', padding: '0 16px', marginTop: 8 }}>
-            {['MNQ market outlook', 'Key support levels MES', 'Look at my screen', 'Pre-market analysis'].map(prompt => (
+            {['Alpha, MNQ market outlook', 'Alpha, key support levels', 'Alpha, look at my screen', 'Alpha, pre-market analysis'].map(prompt => (
               <button key={prompt}
                 onClick={() => { setInput(prompt); setTimeout(() => inputRef.current?.focus(), 50); }}
                 style={{
@@ -498,7 +684,7 @@ export default function Home() {
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask Alpha anything... or say 'look at my screen' to analyze your chart 📊"
+                placeholder="Ask Alpha anything... or just say \"Alpha, look at my screen\" 🎙️"
                 rows={1}
                 style={{
                   flex: 1, background: 'transparent', border: 'none', outline: 'none',
