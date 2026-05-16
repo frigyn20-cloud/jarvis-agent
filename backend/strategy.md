@@ -45,7 +45,7 @@ This is a mechanical ICT model. Alpha knows these rules precisely.
 
 ## RISK RULES (edit these as needed)
 - Max risk per trade: 1% of account
-- Minimum R:R: 2:1
+- Minimum R:R: 1:1
 - Max 2 trades per session
 - No trading during first 5 minutes of RTH open (9:30–9:35 ET)
 - No trading 30 minutes before major economic releases
