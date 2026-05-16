@@ -209,7 +209,7 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
   );
 }
 
-// ─── Screen capture helper ──────────────────────────────────────────────────────────
+// --- Screen capture helper ---
 async function captureScreen(): Promise<string | null> {
   try {
     const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -235,7 +235,7 @@ async function captureScreen(): Promise<string | null> {
   }
 }
 
-// ─── Wake word hook ─────────────────────────────────────────────────────────────────
+// --- Wake word hook ---
 function useWakeWord(
   enabled: boolean,
   onCommand: (text: string) => void,
@@ -449,7 +449,7 @@ export default function Home() {
 
   useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
 
-  // ── Wake word ──────────────────────────────────────────────────────────────
+  // -- Wake word --
   const isBusy = loading || speaking || listening || capturing;
   const { wakeListening, commandListening } = useWakeWord(
     wakeEnabled,
@@ -591,7 +591,7 @@ export default function Home() {
             {['MNQ', 'MES', 'VIX'].map(sym => (
               <span key={sym} style={{ color: 'var(--text-muted)' }}>
                 <span style={{ color: 'var(--primary)', marginRight: 4 }}>{sym}</span>
-                <span style={{ color: 'var(--text-faint)' }}>—</span>
+                <span style={{ color: 'var(--text-faint)' }}>--</span>
               </span>
             ))}
           </div>
