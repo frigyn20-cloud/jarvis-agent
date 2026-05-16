@@ -1,10 +1,12 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from agent import run_agent
 from trading_state import get_session, reset_session, TradingSessionState
+from voice import text_to_speech, speech_to_text
 
 load_dotenv()
 
@@ -24,6 +26,10 @@ class ChatRequest(BaseModel):
     history: list[dict] = []
 
 
+class TTSRequest(BaseModel):
+    text: str
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "alpha-trading-assistant"}
@@ -35,24 +41,37 @@ async def chat(req: ChatRequest):
     return result
 
 
+# ─── Voice endpoints ──────────────────────────────────────────────────────────
+
+@app.post("/voice/tts")
+async def tts(req: TTSRequest):
+    """Convert text to speech. Returns MP3 audio."""
+    audio_bytes = await text_to_speech(req.text)
+    return Response(content=audio_bytes, media_type="audio/mpeg")
+
+
+@app.post("/voice/stt")
+async def stt(audio: UploadFile = File(...)):
+    """Transcribe audio to text using Groq Whisper."""
+    text = await speech_to_text(audio)
+    return {"text": text}
+
+
 # ─── Session State endpoints ──────────────────────────────────────────────────
 
 @app.get("/session", response_model=TradingSessionState)
 def get_session_state():
-    """Get the current trading session state."""
     return get_session()
 
 
 @app.post("/session/reset")
 def reset_session_state(symbol: str = "MNQ"):
-    """Reset session for a new trading day."""
     session = reset_session(symbol)
     return {"status": "reset", "symbol": session.symbol, "date": session.session_date}
 
 
 @app.patch("/session")
 def update_session(updates: dict):
-    """Partially update session state fields."""
     session = get_session()
     for key, value in updates.items():
         if hasattr(session, key):
@@ -63,7 +82,6 @@ def update_session(updates: dict):
 
 @app.post("/session/note")
 def add_session_note(note: str):
-    """Add a timestamped note to the session."""
     session = get_session()
     session.add_note(note)
     return {"status": "added", "notes": session.session_notes}

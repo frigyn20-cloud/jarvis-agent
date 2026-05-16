@@ -1,10 +1,13 @@
 fastapi
 uvicorn[standard]
 python-dotenv
+httpx
+python-multipart
 # Primary LLM
 langchain-anthropic
 # Fallback LLM
 langchain-groq
+groq
 # Core
 langchain-core
 langchain-community

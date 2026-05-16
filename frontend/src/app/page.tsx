@@ -15,7 +15,7 @@ export interface Message {
   model?: string;
 }
 
-function AlphaOrb({ speaking }: { speaking: boolean }) {
+function AlphaOrb({ speaking, listening }: { speaking: boolean; listening: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef   = useRef<number>(0);
 
@@ -40,12 +40,15 @@ function AlphaOrb({ speaking }: { speaking: boolean }) {
     function draw(t: number) {
       ctx.clearRect(0, 0, W, H);
       const spk = speaking;
-      const intensity = spk ? 1.4 : 1.0;
-      const wobble    = spk ? 0.06 : 0.025;
+      const lst = listening;
+      const intensity = spk ? 1.5 : lst ? 1.2 : 1.0;
+      const wobble    = spk ? 0.08 : lst ? 0.05 : 0.025;
 
+      // Outer glow — cyan when speaking, green-tinted when listening
+      const glowColor = lst ? '80,220,120' : '0,210,200';
       const outerGlow = ctx.createRadialGradient(cx, cy, 55, cx, cy, 105);
-      outerGlow.addColorStop(0, `rgba(0,210,200,${0.18 * intensity})`);
-      outerGlow.addColorStop(1, 'rgba(0,210,200,0)');
+      outerGlow.addColorStop(0, `rgba(${glowColor},${0.18 * intensity})`);
+      outerGlow.addColorStop(1, `rgba(${glowColor},0)`);
       ctx.beginPath(); ctx.arc(cx, cy, 105, 0, Math.PI * 2);
       ctx.fillStyle = outerGlow; ctx.fill();
 
@@ -58,30 +61,39 @@ function AlphaOrb({ speaking }: { speaking: boolean }) {
           const a    = p.angle + rSpeed + p.speed * t * 0.001;
           const x    = cx + Math.cos(a) * r;
           const y    = cy + Math.sin(a) * r * 0.38;
-          const op   = p.opacity * (spk ? Math.min(1, 0.6 + Math.abs(Math.sin(t * 0.003 + i))) : 1);
+          const op   = p.opacity * ((spk || lst) ? Math.min(1, 0.6 + Math.abs(Math.sin(t * 0.003 + i))) : 1);
+          const g    = lst ? 200 + ri * 10 : 180 + ri * 20;
+          const b_   = lst ? 120 + ri * 10 : 180 + ri * 10;
           ctx.beginPath(); ctx.arc(x, y, p.size, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(0,${180 + ri * 20},${180 + ri * 10},${op})`;
+          ctx.fillStyle = `rgba(0,${g},${b_},${op})`;
           ctx.fill();
         });
       });
 
       const innerGrad = ctx.createRadialGradient(cx - 10, cy - 10, 2, cx, cy, 46);
-      innerGrad.addColorStop(0, `rgba(0,255,240,${0.55 * intensity})`);
-      innerGrad.addColorStop(0.5, `rgba(0,180,175,${0.35 * intensity})`);
-      innerGrad.addColorStop(1, `rgba(0,80,90,${0.2 * intensity})`);
+      if (lst) {
+        innerGrad.addColorStop(0, `rgba(80,255,120,${0.55 * intensity})`);
+        innerGrad.addColorStop(0.5, `rgba(0,200,100,${0.35 * intensity})`);
+        innerGrad.addColorStop(1, `rgba(0,80,40,${0.2 * intensity})`);
+      } else {
+        innerGrad.addColorStop(0, `rgba(0,255,240,${0.55 * intensity})`);
+        innerGrad.addColorStop(0.5, `rgba(0,180,175,${0.35 * intensity})`);
+        innerGrad.addColorStop(1, `rgba(0,80,90,${0.2 * intensity})`);
+      }
       ctx.beginPath(); ctx.arc(cx, cy, 46, 0, Math.PI * 2);
       ctx.fillStyle = innerGrad; ctx.fill();
 
       const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 14);
       coreGrad.addColorStop(0, `rgba(255,255,255,${0.9 * intensity})`);
-      coreGrad.addColorStop(1, 'rgba(0,210,200,0)');
+      coreGrad.addColorStop(1, lst ? 'rgba(80,255,120,0)' : 'rgba(0,210,200,0)');
       ctx.beginPath(); ctx.arc(cx, cy, 14, 0, Math.PI * 2);
       ctx.fillStyle = coreGrad; ctx.fill();
 
-      if (spk) {
-        const sr = 56 + Math.sin(t * 0.004) * 10;
+      if (spk || lst) {
+        const sr = 56 + Math.sin(t * 0.004) * (spk ? 10 : 6);
         ctx.beginPath(); ctx.arc(cx, cy, sr, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(0,255,220,${0.3 + Math.sin(t * 0.005) * 0.2})`;
+        const pulseColor = lst ? `rgba(80,255,120,${0.3 + Math.sin(t * 0.005) * 0.2})` : `rgba(0,255,220,${0.3 + Math.sin(t * 0.005) * 0.2})`;
+        ctx.strokeStyle = pulseColor;
         ctx.lineWidth = 1; ctx.stroke();
       }
 
@@ -90,7 +102,7 @@ function AlphaOrb({ speaking }: { speaking: boolean }) {
 
     animRef.current = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(animRef.current);
-  }, [speaking]);
+  }, [speaking, listening]);
 
   return <canvas ref={canvasRef} width={220} height={220} style={{ display: 'block' }} />;
 }
@@ -134,6 +146,45 @@ function ModelBadge({ model }: { model: string }) {
   );
 }
 
+// ─── Mic button ───────────────────────────────────────────────────────────────
+function MicButton({ listening, onClick, disabled }: { listening: boolean; onClick: () => void; disabled: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={listening ? 'Stop recording' : 'Hold to speak'}
+      style={{
+        background: listening ? 'rgba(80,220,120,0.15)' : 'rgba(0,210,200,0.08)',
+        border: `1px solid ${listening ? 'rgba(80,220,120,0.5)' : 'var(--border)'}`,
+        borderRadius: 4,
+        padding: '6px 10px',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        transition: 'all 150ms ease',
+        alignSelf: 'flex-end',
+        opacity: disabled ? 0.4 : 1,
+        position: 'relative',
+      }}
+    >
+      {/* Mic SVG icon */}
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={listening ? '#50dc78' : 'var(--primary)'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="9" y="2" width="6" height="11" rx="3" />
+        <path d="M5 10a7 7 0 0 0 14 0" />
+        <line x1="12" y1="19" x2="12" y2="22" />
+        <line x1="9" y1="22" x2="15" y2="22" />
+      </svg>
+      {listening && (
+        <span style={{
+          position: 'absolute', top: 3, right: 3,
+          width: 5, height: 5, borderRadius: '50%',
+          background: '#50dc78',
+          animation: 'blink 0.8s ease-in-out infinite',
+        }} />
+      )}
+    </button>
+  );
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -147,9 +198,14 @@ export default function Home() {
   const [input, setInput]         = useState('');
   const [loading, setLoading]     = useState(false);
   const [speaking, setSpeaking]   = useState(false);
+  const [listening, setListening] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [activeModel, setActiveModel] = useState<string>('claude-sonnet-4-6');
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef     = useRef<HTMLTextAreaElement>(null);
+  const mediaRecRef  = useRef<MediaRecorder | null>(null);
+  const audioChunks  = useRef<Blob[]>([]);
+  const currentAudio = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     fetch(`${BACKEND}/health`)
@@ -157,10 +213,81 @@ export default function Home() {
       .catch(() => setBackendStatus('offline'));
   }, []);
 
-  useEffect(() => { setSpeaking(loading); }, [loading]);
+  // ─── TTS: play Alpha's reply via ElevenLabs ────────────────────────────────
+  const playTTS = useCallback(async (text: string) => {
+    if (!voiceEnabled || !text.trim()) return;
+    try {
+      // Stop any currently playing audio
+      if (currentAudio.current) {
+        currentAudio.current.pause();
+        currentAudio.current = null;
+      }
+      setSpeaking(true);
+      const res = await fetch(`${BACKEND}/voice/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error('TTS failed');
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      currentAudio.current = audio;
+      audio.onended = () => { setSpeaking(false); URL.revokeObjectURL(url); };
+      audio.onerror = () => { setSpeaking(false); };
+      await audio.play();
+    } catch (e) {
+      console.error('TTS error:', e);
+      setSpeaking(false);
+    }
+  }, [voiceEnabled]);
 
-  const sendMessage = useCallback(async () => {
-    const text = input.trim();
+  // ─── STT: record mic and transcribe via Groq Whisper ─────────────────────
+  const toggleMic = useCallback(async () => {
+    if (listening) {
+      // Stop recording
+      mediaRecRef.current?.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunks.current = [];
+      const rec = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecRef.current = rec;
+
+      rec.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.current.push(e.data); };
+
+      rec.onstop = async () => {
+        setListening(false);
+        stream.getTracks().forEach(t => t.stop());
+        const audioBlob = new Blob(audioChunks.current, { type: 'audio/webm' });
+        if (audioBlob.size < 1000) return; // too short, ignore
+
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'recording.webm');
+
+        try {
+          const res = await fetch(`${BACKEND}/voice/stt`, { method: 'POST', body: formData });
+          const data = await res.json();
+          if (data.text) {
+            setInput(data.text);
+            setTimeout(() => inputRef.current?.focus(), 50);
+          }
+        } catch (e) {
+          console.error('STT error:', e);
+        }
+      };
+
+      setListening(true);
+      rec.start();
+    } catch (e) {
+      console.error('Mic error:', e);
+      alert('Microphone access denied. Please allow mic access in your browser.');
+    }
+  }, [listening]);
+
+  const sendMessage = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
     if (!text || loading) return;
 
     const userMsg: Message = { id: Date.now().toString(), role: 'user', content: text, timestamp: new Date() };
@@ -180,27 +307,31 @@ export default function Home() {
       const data = await res.json();
       const model = data.model || 'claude-sonnet-4-6';
       setActiveModel(model);
+      const reply = data.reply || 'No response.';
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: data.reply || 'No response.',
+        content: reply,
         toolCalls: data.tool_calls || [],
         pendingConfirmation: data.pending_confirmation || null,
         timestamp: new Date(),
         model,
       }]);
+      // Auto-play voice response
+      await playTTS(reply);
     } catch {
+      const errMsg = 'CONNECTION LOST. Ensure backend is running: python -m uvicorn main:app --reload --port 8000';
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: 'CONNECTION LOST. Ensure backend is running: python -m uvicorn main:app --reload --port 8000',
+        content: errMsg,
         timestamp: new Date(),
       }]);
     } finally {
       setLoading(false);
       inputRef.current?.focus();
     }
-  }, [input, loading, messages]);
+  }, [input, loading, messages, playTTS]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -237,8 +368,32 @@ export default function Home() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {/* Active model badge in header */}
           <ModelBadge model={activeModel} />
+
+          {/* Voice toggle */}
+          <button
+            onClick={() => {
+              setVoiceEnabled(v => !v);
+              if (speaking && currentAudio.current) { currentAudio.current.pause(); setSpeaking(false); }
+            }}
+            title={voiceEnabled ? 'Disable voice' : 'Enable voice'}
+            style={{
+              background: voiceEnabled ? 'rgba(0,210,200,0.08)' : 'rgba(255,68,102,0.08)',
+              border: `1px solid ${voiceEnabled ? 'rgba(0,210,200,0.25)' : 'rgba(255,68,102,0.25)'}`,
+              borderRadius: 4, padding: '4px 10px', cursor: 'pointer',
+              fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
+              color: voiceEnabled ? 'var(--primary)' : 'var(--red)',
+              display: 'flex', alignItems: 'center', gap: 5,
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              {voiceEnabled
+                ? <><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></>
+                : <><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></>
+              }
+            </svg>
+            {voiceEnabled ? 'VOICE ON' : 'VOICE OFF'}
+          </button>
 
           {/* Ticker strip */}
           <div style={{ display: 'flex', gap: 16, fontFamily: 'Share Tech Mono, monospace', fontSize: 11 }}>
@@ -283,12 +438,18 @@ export default function Home() {
             <div style={{ position: 'relative', padding: 12 }}>
               <HudCorner pos="tl" /><HudCorner pos="tr" />
               <HudCorner pos="bl" /><HudCorner pos="br" />
-              <AlphaOrb speaking={speaking} />
+              <AlphaOrb speaking={speaking} listening={listening} />
             </div>
           </div>
 
           <div style={{ textAlign: 'center', fontFamily: 'Share Tech Mono, monospace', fontSize: 10, letterSpacing: '0.15em' }}>
-            <div style={{ color: 'var(--primary)', marginBottom: 4 }}>{loading ? 'PROCESSING...' : 'STANDBY'}</div>
+            <div style={{
+              color: listening ? '#50dc78' : speaking ? 'var(--accent)' : 'var(--primary)',
+              marginBottom: 4,
+              transition: 'color 200ms ease',
+            }}>
+              {listening ? 'LISTENING...' : speaking ? 'SPEAKING...' : loading ? 'PROCESSING...' : 'STANDBY'}
+            </div>
             <div style={{ color: 'var(--text-faint)' }}>MNQ · MES FUTURES</div>
           </div>
 
@@ -333,7 +494,13 @@ export default function Home() {
                   resize: 'none', minHeight: 24, maxHeight: 120, overflowY: 'auto', lineHeight: 1.5,
                 }}
               />
-              <button onClick={sendMessage} disabled={loading || !input.trim()}
+              {/* Mic button */}
+              <MicButton
+                listening={listening}
+                onClick={toggleMic}
+                disabled={loading}
+              />
+              <button onClick={() => sendMessage()} disabled={loading || !input.trim()}
                 style={{
                   background: loading || !input.trim() ? 'rgba(0,210,200,0.08)' : 'rgba(0,210,200,0.15)',
                   color: loading || !input.trim() ? 'var(--text-faint)' : 'var(--primary)',
