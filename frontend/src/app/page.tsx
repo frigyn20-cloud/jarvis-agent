@@ -44,7 +44,6 @@ function AlphaOrb({ speaking, listening }: { speaking: boolean; listening: boole
       const intensity = spk ? 1.5 : lst ? 1.2 : 1.0;
       const wobble    = spk ? 0.08 : lst ? 0.05 : 0.025;
 
-      // Outer glow — cyan when speaking, green-tinted when listening
       const glowColor = lst ? '80,220,120' : '0,210,200';
       const outerGlow = ctx.createRadialGradient(cx, cy, 55, cx, cy, 105);
       outerGlow.addColorStop(0, `rgba(${glowColor},${0.18 * intensity})`);
@@ -92,7 +91,9 @@ function AlphaOrb({ speaking, listening }: { speaking: boolean; listening: boole
       if (spk || lst) {
         const sr = 56 + Math.sin(t * 0.004) * (spk ? 10 : 6);
         ctx.beginPath(); ctx.arc(cx, cy, sr, 0, Math.PI * 2);
-        const pulseColor = lst ? `rgba(80,255,120,${0.3 + Math.sin(t * 0.005) * 0.2})` : `rgba(0,255,220,${0.3 + Math.sin(t * 0.005) * 0.2})`;
+        const pulseColor = lst
+          ? `rgba(80,255,120,${0.3 + Math.sin(t * 0.005) * 0.2})`
+          : `rgba(0,255,220,${0.3 + Math.sin(t * 0.005) * 0.2})`;
         ctx.strokeStyle = pulseColor;
         ctx.lineWidth = 1; ctx.stroke();
       }
@@ -152,7 +153,7 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
     <button
       onClick={onClick}
       disabled={disabled}
-      title={listening ? 'Stop recording' : 'Hold to speak'}
+      title={listening ? 'Stop & send' : 'Speak to Alpha'}
       style={{
         background: listening ? 'rgba(80,220,120,0.15)' : 'rgba(0,210,200,0.08)',
         border: `1px solid ${listening ? 'rgba(80,220,120,0.5)' : 'var(--border)'}`,
@@ -166,7 +167,6 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
         position: 'relative',
       }}
     >
-      {/* Mic SVG icon */}
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={listening ? '#50dc78' : 'var(--primary)'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="9" y="2" width="6" height="11" rx="3" />
         <path d="M5 10a7 7 0 0 0 14 0" />
@@ -202,10 +202,12 @@ export default function Home() {
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [activeModel, setActiveModel] = useState<string>('claude-sonnet-4-6');
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
-  const inputRef     = useRef<HTMLTextAreaElement>(null);
-  const mediaRecRef  = useRef<MediaRecorder | null>(null);
-  const audioChunks  = useRef<Blob[]>([]);
-  const currentAudio = useRef<HTMLAudioElement | null>(null);
+  const inputRef       = useRef<HTMLTextAreaElement>(null);
+  const mediaRecRef    = useRef<MediaRecorder | null>(null);
+  const audioChunks    = useRef<Blob[]>([]);
+  const currentAudio   = useRef<HTMLAudioElement | null>(null);
+  // ref so onstop callback always has the latest sendMessage
+  const sendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
 
   useEffect(() => {
     fetch(`${BACKEND}/health`)
@@ -217,7 +219,6 @@ export default function Home() {
   const playTTS = useCallback(async (text: string) => {
     if (!voiceEnabled || !text.trim()) return;
     try {
-      // Stop any currently playing audio
       if (currentAudio.current) {
         currentAudio.current.pause();
         currentAudio.current = null;
@@ -229,8 +230,8 @@ export default function Home() {
         body: JSON.stringify({ text }),
       });
       if (!res.ok) throw new Error('TTS failed');
-      const blob = await res.blob();
-      const url  = URL.createObjectURL(blob);
+      const blob  = await res.blob();
+      const url   = URL.createObjectURL(blob);
       const audio = new Audio(url);
       currentAudio.current = audio;
       audio.onended = () => { setSpeaking(false); URL.revokeObjectURL(url); };
@@ -242,50 +243,7 @@ export default function Home() {
     }
   }, [voiceEnabled]);
 
-  // ─── STT: record mic and transcribe via Groq Whisper ─────────────────────
-  const toggleMic = useCallback(async () => {
-    if (listening) {
-      // Stop recording
-      mediaRecRef.current?.stop();
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioChunks.current = [];
-      const rec = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-      mediaRecRef.current = rec;
-
-      rec.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.current.push(e.data); };
-
-      rec.onstop = async () => {
-        setListening(false);
-        stream.getTracks().forEach(t => t.stop());
-        const audioBlob = new Blob(audioChunks.current, { type: 'audio/webm' });
-        if (audioBlob.size < 1000) return; // too short, ignore
-
-        const formData = new FormData();
-        formData.append('audio', audioBlob, 'recording.webm');
-
-        try {
-          const res = await fetch(`${BACKEND}/voice/stt`, { method: 'POST', body: formData });
-          const data = await res.json();
-          if (data.text) {
-            setInput(data.text);
-            setTimeout(() => inputRef.current?.focus(), 50);
-          }
-        } catch (e) {
-          console.error('STT error:', e);
-        }
-      };
-
-      setListening(true);
-      rec.start();
-    } catch (e) {
-      console.error('Mic error:', e);
-      alert('Microphone access denied. Please allow mic access in your browser.');
-    }
-  }, [listening]);
-
+  // ─── Core send logic ──────────────────────────────────────────────────────
   const sendMessage = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim();
     if (!text || loading) return;
@@ -304,7 +262,7 @@ export default function Home() {
         body: JSON.stringify({ message: text, history }),
       });
       if (!res.ok) throw new Error('Backend error');
-      const data = await res.json();
+      const data  = await res.json();
       const model = data.model || 'claude-sonnet-4-6';
       setActiveModel(model);
       const reply = data.reply || 'No response.';
@@ -320,11 +278,10 @@ export default function Home() {
       // Auto-play voice response
       await playTTS(reply);
     } catch {
-      const errMsg = 'CONNECTION LOST. Ensure backend is running: python -m uvicorn main:app --reload --port 8000';
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: errMsg,
+        content: 'CONNECTION LOST. Ensure backend is running: python -m uvicorn main:app --reload --port 8000',
         timestamp: new Date(),
       }]);
     } finally {
@@ -332,6 +289,52 @@ export default function Home() {
       inputRef.current?.focus();
     }
   }, [input, loading, messages, playTTS]);
+
+  // Keep ref in sync so onstop always calls latest version
+  useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
+
+  // ─── STT: record → transcribe → AUTO-SEND ────────────────────────────────
+  const toggleMic = useCallback(async () => {
+    if (listening) {
+      mediaRecRef.current?.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunks.current = [];
+      const rec = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecRef.current = rec;
+
+      rec.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.current.push(e.data); };
+
+      rec.onstop = async () => {
+        setListening(false);
+        stream.getTracks().forEach(t => t.stop());
+        const audioBlob = new Blob(audioChunks.current, { type: 'audio/webm' });
+        if (audioBlob.size < 1000) return;
+
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'recording.webm');
+
+        try {
+          const res  = await fetch(`${BACKEND}/voice/stt`, { method: 'POST', body: formData });
+          const data = await res.json();
+          if (data.text && data.text.trim()) {
+            // ✅ AUTO-SEND directly — no typing needed
+            await sendMessageRef.current(data.text.trim());
+          }
+        } catch (e) {
+          console.error('STT error:', e);
+        }
+      };
+
+      setListening(true);
+      rec.start();
+    } catch (e) {
+      console.error('Mic error:', e);
+      alert('Microphone access denied. Please allow mic access in your browser.');
+    }
+  }, [listening]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -486,7 +489,7 @@ export default function Home() {
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask Alpha about MNQ, MES, market conditions, trade setups..."
+                placeholder="Ask Alpha about MNQ, MES, market conditions, trade setups... or use the mic 🎤"
                 rows={1}
                 style={{
                   flex: 1, background: 'transparent', border: 'none', outline: 'none',
@@ -498,7 +501,7 @@ export default function Home() {
               <MicButton
                 listening={listening}
                 onClick={toggleMic}
-                disabled={loading}
+                disabled={loading || speaking}
               />
               <button onClick={() => sendMessage()} disabled={loading || !input.trim()}
                 style={{
