@@ -120,7 +120,6 @@ function AlphaOrb({ speaking, listening, wakeListening }: { speaking: boolean; l
         ctx.lineWidth = 1; ctx.stroke();
       }
 
-      // Subtle slow pulse when wake-listening
       if (wk) {
         const sr = 52 + Math.sin(t * 0.0015) * 4;
         ctx.beginPath(); ctx.arc(cx, cy, sr, 0, Math.PI * 2);
@@ -237,12 +236,10 @@ async function captureScreen(): Promise<string | null> {
 }
 
 // ─── Wake word hook ─────────────────────────────────────────────────────────────────
-// Uses Web Speech API continuous mode to watch for WAKE_WORD, then records
-// the rest of the utterance as a command and fires onCommand(text).
 function useWakeWord(
   enabled: boolean,
   onCommand: (text: string) => void,
-  busy: boolean,  // don't activate when loading / speaking / already recording
+  busy: boolean,
 ) {
   const recognitionRef  = useRef<SpeechRecognition | null>(null);
   const commandBuffer   = useRef<string>('');
@@ -283,16 +280,14 @@ function useWakeWord(
       if (busy) return;
 
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result    = event.results[i];
+        const result     = event.results[i];
         const transcript = result[0].transcript.toLowerCase().trim();
-        const isFinal   = result.isFinal;
+        const isFinal    = result.isFinal;
 
         if (!awaitingCommand.current) {
-          // Looking for wake word
           if (transcript.includes(WAKE_WORD)) {
             awaitingCommand.current = true;
             setCommandListening(true);
-            // Strip wake word and everything before it, keep the rest as start of command
             const afterWake = transcript.split(WAKE_WORD).slice(1).join(WAKE_WORD).trim();
             if (afterWake) {
               commandBuffer.current = afterWake;
@@ -301,7 +296,6 @@ function useWakeWord(
             }
           }
         } else {
-          // Accumulating the command after the wake word
           if (isFinal) {
             commandBuffer.current += ' ' + result[0].transcript.trim();
             clearSilenceTimer();
@@ -313,7 +307,6 @@ function useWakeWord(
 
     rec.onend = () => {
       if (!enabled) return;
-      // Auto-restart — Web Speech API stops after ~60s of silence
       try { rec.start(); } catch (_) { /* already started */ }
     };
 
@@ -335,7 +328,6 @@ function useWakeWord(
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
 
-  // Update busy ref so the callback always sees fresh value without restarting
   const busyRef = useRef(busy);
   busyRef.current = busy;
 
@@ -640,15 +632,15 @@ export default function Home() {
             <div style={{ color: 'var(--text-faint)' }}>MNQ · MES FUTURES</div>
           </div>
 
-          {/* Wake word hint */}
+          {/* Wake word hint — fixed: single padding property */}
           {wakeListening && !commandListening && !isBusy && (
             <div style={{
               fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
-              color: 'rgba(80,160,255,0.6)', textAlign: 'center', padding: '0 16px',
+              color: 'rgba(80,160,255,0.6)', textAlign: 'center',
               border: '1px solid rgba(80,160,255,0.15)', borderRadius: 4,
               padding: '4px 10px',
             }}>
-              SAY "ALPHA ..." TO ACTIVATE
+              SAY &quot;ALPHA ...&quot; TO ACTIVATE
             </div>
           )}
 
