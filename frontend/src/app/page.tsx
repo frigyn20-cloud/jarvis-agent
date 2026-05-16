@@ -6,9 +6,7 @@ import ChatWindow from '@/components/ChatWindow';
 const BACKEND = 'http://localhost:8000';
 const TTS_PLAYBACK_RATE = 1.15;
 const WAKE_WORD = 'alpha';
-// How long to wait for command after wake word (ms)
 const COMMAND_SILENCE_MS = 2500;
-// How long to wait for first command word after just saying "Alpha" alone (ms)
 const WAKE_ONLY_TIMEOUT_MS = 4000;
 
 const SCREEN_TRIGGERS = [
@@ -253,15 +251,14 @@ async function captureScreen(): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
-// useWakeWord — fixed version
+// useWakeWord
 //
-// Fixes applied:
-//   1. busyRef  — onresult reads a ref so it always sees the latest busy value
-//                 (stale closure bug that silently dropped every transcript)
-//   2. isFinal gate — wake word is only triggered on a *final* result, not
-//                 interim fragments that can fire repeatedly mid-word
-//   3. Two-phase "Alpha alone" support — saying just "Alpha" with nothing
-//                 after it now opens a 4-second window for the next utterance
+// Fixes:
+//   1. busyRef        — onresult always sees the latest busy value (no stale closure)
+//   2. isFinal gate   — wake word only fires on a final result, not interim fragments
+//   3. Two-phase mode — "Alpha" alone opens a 4 s window for the next utterance
+//   4. busy→idle reset — when busy transitions false, ALL command state is cleared
+//                        so the hook is always in a clean state for the next invocation
 // ---------------------------------------------------------------------------
 function useWakeWord(
   enabled: boolean,
@@ -273,38 +270,40 @@ function useWakeWord(
   const awaitingCommand  = useRef(false);
   const silenceTimer     = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wakeOnlyTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [wakeListening, setWakeListening]       = useState(false);
+  const [wakeListening,    setWakeListening]    = useState(false);
   const [commandListening, setCommandListening] = useState(false);
 
-  // FIX 1: keep busy in a ref so onresult closure always sees the current value
+  // FIX 1: always-fresh busy ref read by the onresult closure
   const busyRef = useRef(busy);
   busyRef.current = busy;
 
-  const clearSilenceTimer = () => {
-    if (silenceTimer.current) { clearTimeout(silenceTimer.current); silenceTimer.current = null; }
-  };
-  const clearWakeOnlyTimer = () => {
-    if (wakeOnlyTimer.current) { clearTimeout(wakeOnlyTimer.current); wakeOnlyTimer.current = null; }
-  };
+  const clearSilenceTimer  = () => { if (silenceTimer.current)  { clearTimeout(silenceTimer.current);  silenceTimer.current  = null; } };
+  const clearWakeOnlyTimer = () => { if (wakeOnlyTimer.current) { clearTimeout(wakeOnlyTimer.current); wakeOnlyTimer.current = null; } };
 
-  const flushCommand = useCallback(() => {
+  // Full reset — called both on flush and on busy→idle transition
+  const resetCommandState = useCallback((runCommand?: string) => {
     clearSilenceTimer();
     clearWakeOnlyTimer();
-    const cmd = commandBuffer.current.trim();
-    commandBuffer.current = '';
+    commandBuffer.current   = '';
     awaitingCommand.current = false;
     setCommandListening(false);
-    if (cmd) onCommand(cmd);
+    if (runCommand) onCommand(runCommand);
   }, [onCommand]);
 
-  // Cancel command mode without sending anything (e.g. wake-only timeout expired)
-  const cancelCommand = useCallback(() => {
-    clearSilenceTimer();
-    clearWakeOnlyTimer();
-    commandBuffer.current = '';
-    awaitingCommand.current = false;
-    setCommandListening(false);
-  }, []);
+  // FIX 4: when busy goes true→false, discard any stale pending command state
+  // so the hook is always clean and ready for the next "Alpha" invocation.
+  const prevBusyRef = useRef(busy);
+  useEffect(() => {
+    if (prevBusyRef.current && !busy) {
+      // Just became idle — cancel any lingering timers / awaiting state
+      clearSilenceTimer();
+      clearWakeOnlyTimer();
+      commandBuffer.current   = '';
+      awaitingCommand.current = false;
+      setCommandListening(false);
+    }
+    prevBusyRef.current = busy;
+  }, [busy]);
 
   useEffect(() => {
     const SR =
@@ -322,7 +321,7 @@ function useWakeWord(
     recognitionRef.current = rec;
 
     rec.onresult = (event: SpeechRecognitionEvent) => {
-      // FIX 1: use ref, not the stale closure value
+      // FIX 1: read ref, not stale closure
       if (busyRef.current) return;
 
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -331,7 +330,7 @@ function useWakeWord(
         const isFinal    = result.isFinal;
 
         if (!awaitingCommand.current) {
-          // FIX 2: only act on FINAL results for wake-word detection
+          // FIX 2: only trigger on final results
           if (isFinal && transcript.includes(WAKE_WORD)) {
             awaitingCommand.current = true;
             setCommandListening(true);
@@ -343,26 +342,26 @@ function useWakeWord(
               .trim();
 
             if (afterWake) {
-              // "Alpha do something" — command is already in this utterance
+              // "Alpha do something" — command inline
               commandBuffer.current = afterWake;
               clearWakeOnlyTimer();
               clearSilenceTimer();
-              silenceTimer.current = setTimeout(flushCommand, COMMAND_SILENCE_MS);
+              silenceTimer.current = setTimeout(() => resetCommandState(commandBuffer.current.trim()), COMMAND_SILENCE_MS);
             } else {
-              // FIX 3: "Alpha" alone — open a window for the NEXT utterance
+              // FIX 3: "Alpha" alone — wait for next utterance
               clearSilenceTimer();
-              wakeOnlyTimer.current = setTimeout(cancelCommand, WAKE_ONLY_TIMEOUT_MS);
+              wakeOnlyTimer.current = setTimeout(() => resetCommandState(), WAKE_ONLY_TIMEOUT_MS);
             }
           }
         } else {
-          // Already in command mode — collect the next spoken sentence
+          // Command mode — collect final words
           if (isFinal) {
             const spoken = result[0].transcript.trim();
             if (spoken) {
               commandBuffer.current += (commandBuffer.current ? ' ' : '') + spoken;
               clearWakeOnlyTimer();
               clearSilenceTimer();
-              silenceTimer.current = setTimeout(flushCommand, COMMAND_SILENCE_MS);
+              silenceTimer.current = setTimeout(() => resetCommandState(commandBuffer.current.trim()), COMMAND_SILENCE_MS);
             }
           }
         }
@@ -415,10 +414,10 @@ export default function Home() {
   const [activeModel, setActiveModel]   = useState<string>('claude-sonnet-4-6');
   const [lastHadImage, setLastHadImage] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
-  const inputRef      = useRef<HTMLTextAreaElement>(null);
-  const mediaRecRef   = useRef<MediaRecorder | null>(null);
-  const audioChunks   = useRef<Blob[]>([]);
-  const currentAudio  = useRef<HTMLAudioElement | null>(null);
+  const inputRef       = useRef<HTMLTextAreaElement>(null);
+  const mediaRecRef    = useRef<MediaRecorder | null>(null);
+  const audioChunks    = useRef<Blob[]>([]);
+  const currentAudio   = useRef<HTMLAudioElement | null>(null);
   const sendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
 
   useEffect(() => {
@@ -573,12 +572,12 @@ export default function Home() {
     'STANDBY';
 
   const statusColor =
-    capturing        ? '#ffd700'               :
-    commandListening ? '#50dc78'               :
-    listening        ? '#50dc78'               :
-    speaking         ? 'var(--accent)'         :
-    loading          ? 'var(--primary)'        :
-    wakeListening    ? 'rgba(80,160,255,0.9)'  :
+    capturing        ? '#ffd700'              :
+    commandListening ? '#50dc78'              :
+    listening        ? '#50dc78'              :
+    speaking         ? 'var(--accent)'        :
+    loading          ? 'var(--primary)'       :
+    wakeListening    ? 'rgba(80,160,255,0.9)' :
     'var(--primary)';
 
   return (
