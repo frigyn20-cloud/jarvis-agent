@@ -48,6 +48,40 @@ function afterWakeText(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// AudioContext keepalive
+// Holds a silent stream connected to an AudioContext so Chrome never
+// considers the mic "idle" and stops SpeechRecognition.
+// Call once after the first getUserMedia grant.
+// ---------------------------------------------------------------------------
+let keepaliveCtx: AudioContext | null = null;
+let keepaliveStream: MediaStream | null = null;
+
+async function startMicKeepalive() {
+  if (keepaliveCtx) return; // already running
+  try {
+    keepaliveStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    keepaliveCtx = new AudioContext();
+    const src = keepaliveCtx.createMediaStreamSource(keepaliveStream);
+    // Route to a gain node with gain=0 (silent) so nothing is output
+    const gain = keepaliveCtx.createGain();
+    gain.gain.value = 0;
+    src.connect(gain);
+    gain.connect(keepaliveCtx.destination);
+    // Resume context in case it starts suspended
+    if (keepaliveCtx.state === 'suspended') await keepaliveCtx.resume();
+  } catch (e) {
+    console.warn('Mic keepalive failed (permission not granted yet?):', e);
+  }
+}
+
+function stopMicKeepalive() {
+  keepaliveCtx?.close();
+  keepaliveCtx = null;
+  keepaliveStream?.getTracks().forEach(t => t.stop());
+  keepaliveStream = null;
+}
+
+// ---------------------------------------------------------------------------
 // Screenshot helpers
 // ---------------------------------------------------------------------------
 let html2canvasLoaded = false;
@@ -251,10 +285,16 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
       try { recRef.current?.stop(); } catch (_) {}
       recRef.current = null;
       setWakeListening(false);
+      // Stop keepalive when wake word is disabled
+      stopMicKeepalive();
       return;
     }
 
     let dead = false;
+
+    // Start the silent AudioContext keepalive so Chrome holds the mic open
+    // and SpeechRecognition never auto-stops due to perceived silence.
+    startMicKeepalive();
 
     function buildRec(): SpeechRecognition {
       const r = new SR!();
@@ -266,6 +306,10 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
       r.onstart = () => {
         restartPending.current = false;
         setWakeListening(true);
+        // Re-resume AudioContext if it got suspended (e.g. tab focus loss)
+        if (keepaliveCtx && keepaliveCtx.state === 'suspended') {
+          keepaliveCtx.resume().catch(() => {});
+        }
       };
 
       r.onresult = (event: SpeechRecognitionEvent) => {
@@ -304,26 +348,27 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
       };
 
       r.onerror = (e: SpeechRecognitionErrorEvent) => {
+        // no-speech / aborted are normal — do not log
         if (e.error === 'no-speech' || e.error === 'aborted') return;
         console.warn('Wake word error:', e.error);
       };
 
-      // Safe restart: one pending restart at a time, no recursion
       r.onend = () => {
         setWakeListening(false);
         if (dead || !enabledRef.current || restartPending.current) return;
         restartPending.current = true;
+        // Short delay then restart — keepalive means the browser will grant
+        // mic immediately without a new permission prompt
         setTimeout(() => {
           restartPending.current = false;
           if (dead || !enabledRef.current) return;
           try {
             r.start();
           } catch (_) {
-            // instance is dead — build a fresh one
             recRef.current = buildRec();
             try { recRef.current.start(); } catch (__) {}
           }
-        }, 400);
+        }, 150); // 150ms is enough — keepalive ensures instant reconnect
       };
 
       return r;
@@ -351,7 +396,7 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
 }
 
 // ---------------------------------------------------------------------------
-// Draggable floating listener widget (replaces broken popup window)
+// Draggable floating listener widget
 // ---------------------------------------------------------------------------
 function FloatingListener({
   speaking, listening, commandListening, wakeListening, isBusy, statusLabel, statusColor,
@@ -402,25 +447,18 @@ function FloatingListener({
         backdropFilter: 'blur(12px)',
       }}
     >
-      {/* drag handle bar */}
       <div style={{ width: 32, height: 3, borderRadius: 2, background: 'rgba(0,210,200,0.3)', marginBottom: 2 }} />
-
-      {/* close button */}
       <button
         onClick={onClose}
         style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0 }}
         title="Close floating listener"
       >✕</button>
-
       <AlphaOrb speaking={speaking} listening={commandListening || listening} wakeListening={wakeListening && !commandListening && !listening} size={100} />
-
       <div style={{ fontSize: 9, letterSpacing: '0.2em', color: '#00d2c8', fontFamily: 'monospace', fontWeight: 700, marginTop: -4 }}>ALPHA</div>
-
       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
         <span style={{ width: 5, height: 5, borderRadius: '50%', background: dotColor, display: 'inline-block', boxShadow: `0 0 4px ${dotColor}` }} />
         <span style={{ fontSize: 8, letterSpacing: '0.12em', color: statusColor, fontFamily: 'monospace' }}>{statusLabel}</span>
       </div>
-
       {!isBusy && wakeListening && !commandListening && (
         <div style={{ fontSize: 7, color: 'rgba(80,160,255,0.6)', fontFamily: 'monospace', letterSpacing: '0.08em', textAlign: 'center', padding: '0 8px' }}>say &ldquo;Alpha…&rdquo;</div>
       )}
@@ -434,7 +472,7 @@ function FloatingListener({
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([{
     id: '0', role: 'assistant',
-    content: 'ALPHA ONLINE. Wake word active — say "Alpha" followed by your command. Click "FLOAT" to pin a mini-orb anywhere on screen.',
+    content: 'ALPHA ONLINE. Mic is held open permanently — say "Alpha" followed by your command anytime.',
     timestamp: new Date(), model: 'claude-sonnet-4-6',
   }]);
   const [input, setInput] = useState('');
@@ -459,6 +497,25 @@ export default function Home() {
     fetch(`${BACKEND}/health`)
       .then(r => r.ok ? setBackendStatus('ok') : setBackendStatus('offline'))
       .catch(() => setBackendStatus('offline'));
+  }, []);
+
+  // Start mic keepalive as soon as component mounts (first interaction will
+  // resolve any permission prompt; AudioContext resumes on first user gesture)
+  useEffect(() => {
+    // Browsers require a user gesture before AudioContext can start.
+    // We hook into the first click/keydown on the document.
+    const onGesture = () => {
+      startMicKeepalive();
+      document.removeEventListener('click', onGesture);
+      document.removeEventListener('keydown', onGesture);
+    };
+    document.addEventListener('click', onGesture);
+    document.addEventListener('keydown', onGesture);
+    return () => {
+      document.removeEventListener('click', onGesture);
+      document.removeEventListener('keydown', onGesture);
+      stopMicKeepalive();
+    };
   }, []);
 
   const playTTS = useCallback(async (text: string) => {
@@ -591,7 +648,6 @@ export default function Home() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <ModelBadge model={activeModel} hasImage={lastHadImage} />
 
-          {/* FLOAT button — replaces broken POP OUT popup */}
           <button
             onClick={() => setFloatOpen(v => !v)}
             title="Pin a floating mini-orb on screen"
@@ -678,7 +734,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Floating mini-orb overlay — same page, same mic permission, no popup */}
       {floatOpen && (
         <FloatingListener
           speaking={speaking}
