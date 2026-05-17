@@ -48,44 +48,98 @@ function afterWakeText(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Screenshot helpers
+// Screen capture — locked tab stream
+//
+// Strategy:
+//   1. User clicks "CHART TAB" button once → getDisplayMedia() prompts them
+//      to pick their TradingView tab → we store the MediaStream.
+//   2. On every screen-request we grab a frame from that locked stream.
+//   3. If the stream has ended (tab closed/changed) we clear it so the next
+//      request re-prompts.
+//   4. If no locked stream exists we fall back to a fresh getDisplayMedia().
 // ---------------------------------------------------------------------------
-let html2canvasLoaded = false;
-async function loadHtml2Canvas(): Promise<typeof import('html2canvas').default> {
-  if (!html2canvasLoaded) {
-    await new Promise<void>((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
-      s.onload = () => { html2canvasLoaded = true; resolve(); };
-      s.onerror = reject;
-      document.head.appendChild(s);
+let lockedStream: MediaStream | null = null;
+
+function releaseLocked() {
+  if (lockedStream) {
+    lockedStream.getTracks().forEach(t => t.stop());
+    lockedStream = null;
+  }
+}
+
+async function acquireStream(): Promise<MediaStream | null> {
+  try {
+    // preferCurrentTab: false forces the browser to show the full tab picker
+    // so the user can choose their TradingView tab, not just Alpha.
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: 1920, height: 1080 } as MediaTrackConstraints,
+      audio: false,
+      // @ts-expect-error — non-standard but supported in Chrome 94+
+      preferCurrentTab: false,
     });
+    return stream;
+  } catch {
+    return null;
   }
-  return (window as unknown as { html2canvas: typeof import('html2canvas').default }).html2canvas;
 }
-async function captureCurrentTab(): Promise<string | null> {
+
+async function frameFromStream(stream: MediaStream): Promise<string | null> {
+  const track = stream.getVideoTracks()[0];
+  if (!track || track.readyState === 'ended') return null;
   try {
-    const h2c = await loadHtml2Canvas();
-    const canvas = await h2c(document.body, { useCORS: true, allowTaint: true, scale: 1, logging: false });
+    // ImageCapture API — best quality, no flicker
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ic = new (window as any).ImageCapture(track);
+    const bitmap = await ic.grabFrame();
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width; canvas.height = bitmap.height;
+    canvas.getContext('2d')!.drawImage(bitmap, 0, 0);
     return canvas.toDataURL('image/png').split(',')[1];
-  } catch (e) {
-    console.error('html2canvas failed:', e);
-    return captureViaDisplayMedia();
-  }
-}
-async function captureViaDisplayMedia(): Promise<string | null> {
-  try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({ video: { width: 1920, height: 1080 } as MediaTrackConstraints, audio: false });
+  } catch {
+    // Fallback: render via <video>
     const video = document.createElement('video');
-    video.srcObject = stream;
+    video.srcObject = new MediaStream([track]);
     await new Promise<void>(r => { video.onloadedmetadata = () => r(); });
     await video.play();
     const canvas = document.createElement('canvas');
     canvas.width = video.videoWidth; canvas.height = video.videoHeight;
     canvas.getContext('2d')!.drawImage(video, 0, 0);
-    stream.getTracks().forEach(t => t.stop());
+    video.srcObject = null;
     return canvas.toDataURL('image/png').split(',')[1];
-  } catch { return null; }
+  }
+}
+
+// Called when user says "look at my chart" etc.
+async function captureScreen(): Promise<string | null> {
+  // If we have a locked stream, try to reuse it
+  if (lockedStream) {
+    const track = lockedStream.getVideoTracks()[0];
+    if (track && track.readyState !== 'ended') {
+      return frameFromStream(lockedStream);
+    }
+    // Stream died — clear it and fall through to re-prompt
+    releaseLocked();
+  }
+  // No locked stream — ask user to pick a tab
+  const stream = await acquireStream();
+  if (!stream) return null;
+  const frame = await frameFromStream(stream);
+  // Stop the one-off stream immediately (don't lock it)
+  stream.getTracks().forEach(t => t.stop());
+  return frame;
+}
+
+// Called by the "CHART TAB" button — lets user lock onto a specific tab
+async function lockChartTab(): Promise<boolean> {
+  releaseLocked();
+  const stream = await acquireStream();
+  if (!stream) return false;
+  lockedStream = stream;
+  // Auto-release if user closes the tab share
+  stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+    lockedStream = null;
+  });
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,9 +250,6 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
 
 // ---------------------------------------------------------------------------
 // useWakeWord
-// Waits for a user gesture (gestureReady) before starting SpeechRecognition.
-// This prevents browser crashes that happen when the speech API fires
-// immediately on page load without any prior user interaction.
 // ---------------------------------------------------------------------------
 function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: boolean) {
   const recRef = useRef<SpeechRecognition | null>(null);
@@ -213,14 +264,12 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
   const deadRef = useRef(false);
   const [wakeListening, setWakeListening] = useState(false);
   const [commandListening, setCommandListening] = useState(false);
-  // gestureReady: true once the user has clicked/typed anywhere on the page
   const [gestureReady, setGestureReady] = useState(false);
 
   enabledRef.current = enabled;
   busyRef.current = busy;
   onCommandRef.current = onCommand;
 
-  // Listen for first user gesture globally
   useEffect(() => {
     if (gestureReady) return;
     const mark = () => setGestureReady(true);
@@ -240,18 +289,12 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
   }, []);
 
   const reset = useCallback(() => {
-    clearT();
-    cmdBuf.current = '';
-    awaitingCmd.current = false;
-    wakeLatched.current = false;
+    clearT(); cmdBuf.current = ''; awaitingCmd.current = false; wakeLatched.current = false;
     setCommandListening(false);
   }, [clearT]);
 
   const dispatch = useCallback((cmd: string) => {
-    clearT();
-    cmdBuf.current = '';
-    awaitingCmd.current = false;
-    wakeLatched.current = false;
+    clearT(); cmdBuf.current = ''; awaitingCmd.current = false; wakeLatched.current = false;
     setCommandListening(false);
     if (cmd.trim()) onCommandRef.current(cmd.trim());
   }, [clearT]);
@@ -262,7 +305,6 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
     prevBusy.current = busy;
   }, [busy, reset]);
 
-  // Only start SpeechRecognition once both enabled=true AND gestureReady=true
   useEffect(() => {
     const SR =
       (window as unknown as { SpeechRecognition?: typeof globalThis.SpeechRecognition }).SpeechRecognition ||
@@ -272,8 +314,7 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
       deadRef.current = true;
       try { recRef.current?.stop(); } catch (_) {}
       recRef.current = null;
-      setWakeListening(false);
-      setCommandListening(false);
+      setWakeListening(false); setCommandListening(false);
       return;
     }
 
@@ -283,10 +324,7 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
     function startRec() {
       if (deadRef.current || !enabledRef.current) return;
       const r = new SR!();
-      r.continuous = true;
-      r.interimResults = true;
-      r.lang = 'en-US';
-      r.maxAlternatives = 3;
+      r.continuous = true; r.interimResults = true; r.lang = 'en-US'; r.maxAlternatives = 3;
       recRef.current = r;
 
       r.onresult = (event: SpeechRecognitionEvent) => {
@@ -298,13 +336,10 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
           for (let a = 0; a < result.length; a++) combined += ' ' + result[a].transcript;
           if (!awaitingCmd.current) {
             if (hasWake(combined) && !wakeLatched.current) {
-              wakeLatched.current = true;
-              awaitingCmd.current = true;
-              setCommandListening(true);
+              wakeLatched.current = true; awaitingCmd.current = true; setCommandListening(true);
               const tail = afterWakeText(combined);
               if (tail) {
-                cmdBuf.current = tail;
-                clearT();
+                cmdBuf.current = tail; clearT();
                 silenceT.current = setTimeout(() => dispatch(cmdBuf.current), COMMAND_SILENCE_MS);
               } else {
                 clearT();
@@ -329,10 +364,7 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
       };
 
       r.onend = () => {
-        if (deadRef.current || !enabledRef.current) {
-          setWakeListening(false);
-          return;
-        }
+        if (deadRef.current || !enabledRef.current) { setWakeListening(false); return; }
         setTimeout(startRec, 150);
       };
 
@@ -344,12 +376,8 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
     return () => {
       deadRef.current = true;
       try { recRef.current?.stop(); } catch (_) {}
-      recRef.current = null;
-      clearT();
-      setCommandListening(false);
-      cmdBuf.current = '';
-      awaitingCmd.current = false;
-      wakeLatched.current = false;
+      recRef.current = null; clearT(); setCommandListening(false);
+      cmdBuf.current = ''; awaitingCmd.current = false; wakeLatched.current = false;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, gestureReady]);
@@ -361,12 +389,10 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
 // Draggable floating listener widget
 // ---------------------------------------------------------------------------
 function FloatingListener({
-  speaking, listening, commandListening, wakeListening, isBusy, statusLabel, statusColor,
-  onClose,
+  speaking, listening, commandListening, wakeListening, isBusy, statusLabel, statusColor, onClose,
 }: {
   speaking: boolean; listening: boolean; commandListening: boolean; wakeListening: boolean;
-  isBusy: boolean; statusLabel: string; statusColor: string;
-  onClose: () => void;
+  isBusy: boolean; statusLabel: string; statusColor: string; onClose: () => void;
 }) {
   const [pos, setPos] = useState({ x: window.innerWidth - 200, y: 80 });
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
@@ -380,16 +406,14 @@ function FloatingListener({
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (!dragRef.current) return;
-      const dx = e.clientX - dragRef.current.startX;
-      const dy = e.clientY - dragRef.current.startY;
+      const dx = e.clientX - dragRef.current.startX, dy = e.clientY - dragRef.current.startY;
       setPos({
         x: Math.max(0, Math.min(window.innerWidth - 160, dragRef.current.origX + dx)),
         y: Math.max(0, Math.min(window.innerHeight - 200, dragRef.current.origY + dy)),
       });
     };
     const onUp = () => { dragRef.current = null; };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
   }, []);
 
@@ -399,7 +423,7 @@ function FloatingListener({
   return (
     <div onMouseDown={onMouseDown} style={{ position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000, width: 160, background: 'rgba(7,21,24,0.97)', border: '1px solid rgba(0,210,200,0.35)', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.6)', cursor: 'grab', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '10px 0 12px', gap: 6, userSelect: 'none', backdropFilter: 'blur(12px)' }}>
       <div style={{ width: 32, height: 3, borderRadius: 2, background: 'rgba(0,210,200,0.3)', marginBottom: 2 }} />
-      <button onClick={onClose} style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0 }} title="Close floating listener">✕</button>
+      <button onClick={onClose} style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0 }} title="Close">✕</button>
       <AlphaOrb speaking={speaking} listening={commandListening || listening} wakeListening={wakeListening && !commandListening && !listening} size={100} />
       <div style={{ fontSize: 9, letterSpacing: '0.2em', color: '#00d2c8', fontFamily: 'monospace', fontWeight: 700, marginTop: -4 }}>ALPHA</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -419,7 +443,7 @@ function FloatingListener({
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([{
     id: '0', role: 'assistant',
-    content: 'ALPHA ONLINE. Wake word is active — just say "Alpha" followed by your command.',
+    content: 'ALPHA ONLINE. Click \"CHART TAB\" in the header to lock onto your TradingView tab, then say \"Alpha, analyze my chart\" anytime.',
     timestamp: new Date(), model: 'claude-sonnet-4-6',
   }]);
   const [input, setInput] = useState('');
@@ -428,13 +452,13 @@ export default function Home() {
   const [listening, setListening] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
-  // Wake ON by default — SpeechRecognition won't actually start until user
-  // makes a gesture (click/keypress), so no crash on load.
   const [wakeEnabled, setWakeEnabled] = useState(true);
   const [activeModel, setActiveModel] = useState('claude-sonnet-4-6');
   const [lastHadImage, setLastHadImage] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
   const [floatOpen, setFloatOpen] = useState(false);
+  // chartTabLocked: true when user has locked onto an external tab stream
+  const [chartTabLocked, setChartTabLocked] = useState(false);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const mediaRecRef = useRef<MediaRecorder | null>(null);
@@ -447,6 +471,32 @@ export default function Home() {
       .then(r => r.ok ? setBackendStatus('ok') : setBackendStatus('offline'))
       .catch(() => setBackendStatus('offline'));
   }, []);
+
+  // Keep chartTabLocked in sync if the user closes the browser share
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (chartTabLocked && !lockedStream) setChartTabLocked(false);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [chartTabLocked]);
+
+  const handleLockChartTab = useCallback(async () => {
+    if (chartTabLocked) {
+      // Toggle off — release the stream
+      releaseLocked();
+      setChartTabLocked(false);
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Chart tab unlinked. I will prompt you to pick a tab on the next screen request.', timestamp: new Date() }]);
+      return;
+    }
+    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Opening tab picker — please select your TradingView tab in the browser prompt.', timestamp: new Date() }]);
+    const ok = await lockChartTab();
+    if (ok) {
+      setChartTabLocked(true);
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Chart tab locked ✓ I will capture that tab every time you say "Alpha, analyze my chart" — no more prompts needed.', timestamp: new Date() }]);
+    } else {
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Tab selection cancelled. Try again when ready.', timestamp: new Date() }]);
+    }
+  }, [chartTabLocked]);
 
   const playTTS = useCallback(async (text: string) => {
     if (!voiceEnabled || !text.trim()) return;
@@ -472,10 +522,10 @@ export default function Home() {
     let imageBase64: string | null = null;
     if (isScreenRequest(text)) {
       setCapturing(true);
-      imageBase64 = await captureCurrentTab();
+      imageBase64 = await captureScreen();
       setCapturing(false);
       if (!imageBase64) {
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Unable to capture screen.', timestamp: new Date() }]);
+        setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Screen capture cancelled or failed. Try clicking \"CHART TAB\" first to lock onto your TradingView tab.', timestamp: new Date() }]);
         return;
       }
     }
@@ -491,8 +541,7 @@ export default function Home() {
       if (!res.ok) throw new Error('Backend error');
       const data = await res.json();
       const model = data.model || 'claude-sonnet-4-6';
-      setActiveModel(model);
-      setLastHadImage(!!imageBase64);
+      setActiveModel(model); setLastHadImage(!!imageBase64);
       const reply = data.reply || 'No response.';
       setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', content: reply, toolCalls: data.tool_calls || [], pendingConfirmation: data.pending_confirmation || null, timestamp: new Date(), model }]);
       await playTTS(reply);
@@ -578,7 +627,20 @@ export default function Home() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <ModelBadge model={activeModel} hasImage={lastHadImage} />
 
-          <button onClick={() => setFloatOpen(v => !v)} title="Pin a floating mini-orb on screen"
+          {/* CHART TAB lock button */}
+          <button
+            onClick={handleLockChartTab}
+            title={chartTabLocked ? 'Chart tab locked — click to release' : 'Lock onto your TradingView tab for instant screen capture'}
+            style={{ background: chartTabLocked ? 'rgba(255,200,0,0.12)' : 'rgba(0,210,200,0.05)', border: `1px solid ${chartTabLocked ? 'rgba(255,200,0,0.5)' : 'rgba(0,210,200,0.2)'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: chartTabLocked ? '#ffd700' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              {chartTabLocked
+                ? <><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></>
+                : <><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 9.9-1" /></>}
+            </svg>
+            {chartTabLocked ? 'CHART LOCKED' : 'CHART TAB'}
+          </button>
+
+          <button onClick={() => setFloatOpen(v => !v)}
             style={{ background: floatOpen ? 'rgba(0,210,200,0.12)' : 'rgba(0,210,200,0.05)', border: `1px solid ${floatOpen ? 'rgba(0,210,200,0.5)' : 'rgba(0,210,200,0.2)'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: floatOpen ? 'var(--primary)' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="5" r="3" /><path d="M12 8v13" /><path d="M5 14l7-6 7 6" /></svg>
             {floatOpen ? 'FLOAT ON' : 'FLOAT'}
@@ -628,12 +690,16 @@ export default function Home() {
             <div style={{ color: 'var(--text-faint)' }}>MNQ - MES FUTURES</div>
           </div>
 
+          {chartTabLocked && (
+            <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: '#ffd700', textAlign: 'center', border: '1px solid rgba(255,200,0,0.2)', borderRadius: 4, padding: '4px 10px' }}>📷 CHART TAB LOCKED</div>
+          )}
+
           {wakeListening && !commandListening && !isBusy && (
             <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: 'rgba(80,160,255,0.6)', textAlign: 'center', border: '1px solid rgba(80,160,255,0.15)', borderRadius: 4, padding: '4px 10px' }}>SAY &quot;ALPHA ...&quot; TO ACTIVATE</div>
           )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', padding: '0 16px', marginTop: 8 }}>
-            {['Alpha, MNQ market outlook', 'Alpha, key support levels', 'Alpha, look at my screen', 'Alpha, pre-market analysis'].map(prompt => (
+            {['Alpha, MNQ market outlook', 'Alpha, key support levels', 'Alpha, analyze my chart', 'Alpha, pre-market analysis'].map(prompt => (
               <button key={prompt} onClick={() => { setInput(prompt); setTimeout(() => inputRef.current?.focus(), 50); }}
                 style={{ background: 'rgba(0,210,200,0.04)', border: '1px solid var(--border)', borderRadius: 4, padding: '6px 10px', color: 'var(--text-muted)', fontSize: 10, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.05em', cursor: 'pointer', textAlign: 'left', transition: 'all 150ms ease' }}
                 onMouseEnter={e => { (e.target as HTMLElement).style.borderColor = 'var(--primary)'; (e.target as HTMLElement).style.color = 'var(--primary)'; }}
@@ -649,7 +715,7 @@ export default function Home() {
             <div style={{ display: 'flex', gap: 10, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px' }}>
               <span style={{ color: capturing ? '#ffd700' : 'var(--primary)', fontFamily: 'Share Tech Mono, monospace', fontSize: 13, alignSelf: 'flex-end', paddingBottom: 1 }}>{'>'}</span>
               <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
-                placeholder='Ask Alpha anything... or say "Alpha, look at my screen"' rows={1}
+                placeholder='Ask Alpha anything... or say "Alpha, analyze my chart"' rows={1}
                 style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--text)', font: 'inherit', fontSize: 14, resize: 'none', minHeight: 24, maxHeight: 120, overflowY: 'auto', lineHeight: 1.5 }} />
               <MicButton listening={listening} onClick={toggleMic} disabled={loading || speaking || capturing} />
               <button onClick={() => sendMessage()} disabled={loading || !input.trim() || capturing}
