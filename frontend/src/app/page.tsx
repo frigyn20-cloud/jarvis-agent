@@ -48,29 +48,25 @@ function afterWakeText(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// AudioContext keepalive
-// Holds a silent stream connected to an AudioContext so Chrome never
-// considers the mic "idle" and stops SpeechRecognition.
-// Call once after the first getUserMedia grant.
+// AudioContext keepalive — holds a silent mic stream open so Chrome never
+// considers the mic idle and throttles SpeechRecognition restarts.
 // ---------------------------------------------------------------------------
 let keepaliveCtx: AudioContext | null = null;
 let keepaliveStream: MediaStream | null = null;
 
 async function startMicKeepalive() {
-  if (keepaliveCtx) return; // already running
+  if (keepaliveCtx) return;
   try {
     keepaliveStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     keepaliveCtx = new AudioContext();
     const src = keepaliveCtx.createMediaStreamSource(keepaliveStream);
-    // Route to a gain node with gain=0 (silent) so nothing is output
     const gain = keepaliveCtx.createGain();
     gain.gain.value = 0;
     src.connect(gain);
     gain.connect(keepaliveCtx.destination);
-    // Resume context in case it starts suspended
     if (keepaliveCtx.state === 'suspended') await keepaliveCtx.resume();
   } catch (e) {
-    console.warn('Mic keepalive failed (permission not granted yet?):', e);
+    console.warn('Mic keepalive failed:', e);
   }
 }
 
@@ -241,7 +237,10 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
   const enabledRef = useRef(enabled);
   const busyRef = useRef(busy);
   const onCommandRef = useRef(onCommand);
-  const restartPending = useRef(false);
+  const deadRef = useRef(false);
+  // wakeListening stays TRUE the entire time wake is enabled.
+  // We only flip it false when explicitly disabled or unmounted.
+  // This prevents the orb from flickering during the automatic restart cycle.
   const [wakeListening, setWakeListening] = useState(false);
   const [commandListening, setCommandListening] = useState(false);
 
@@ -281,35 +280,35 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
     const SR =
       (window as unknown as { SpeechRecognition?: typeof globalThis.SpeechRecognition }).SpeechRecognition ||
       (window as unknown as { webkitSpeechRecognition?: typeof globalThis.SpeechRecognition }).webkitSpeechRecognition;
+
     if (!SR || !enabled) {
+      deadRef.current = true;
       try { recRef.current?.stop(); } catch (_) {}
       recRef.current = null;
+      // Only now do we hide the wake indicator
       setWakeListening(false);
-      // Stop keepalive when wake word is disabled
+      setCommandListening(false);
       stopMicKeepalive();
       return;
     }
 
-    let dead = false;
-
-    // Start the silent AudioContext keepalive so Chrome holds the mic open
-    // and SpeechRecognition never auto-stops due to perceived silence.
+    deadRef.current = false;
     startMicKeepalive();
+    // Show wake indicator immediately — it stays on until disabled
+    setWakeListening(true);
 
-    function buildRec(): SpeechRecognition {
+    function startRec() {
+      if (deadRef.current || !enabledRef.current) return;
+
       const r = new SR!();
       r.continuous = true;
       r.interimResults = true;
       r.lang = 'en-US';
       r.maxAlternatives = 3;
+      recRef.current = r;
 
       r.onstart = () => {
-        restartPending.current = false;
-        setWakeListening(true);
-        // Re-resume AudioContext if it got suspended (e.g. tab focus loss)
-        if (keepaliveCtx && keepaliveCtx.state === 'suspended') {
-          keepaliveCtx.resume().catch(() => {});
-        }
+        if (keepaliveCtx?.state === 'suspended') keepaliveCtx.resume().catch(() => {});
       };
 
       r.onresult = (event: SpeechRecognitionEvent) => {
@@ -348,42 +347,31 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
       };
 
       r.onerror = (e: SpeechRecognitionErrorEvent) => {
-        // no-speech / aborted are normal — do not log
         if (e.error === 'no-speech' || e.error === 'aborted') return;
         console.warn('Wake word error:', e.error);
       };
 
       r.onend = () => {
-        setWakeListening(false);
-        if (dead || !enabledRef.current || restartPending.current) return;
-        restartPending.current = true;
-        // Short delay then restart — keepalive means the browser will grant
-        // mic immediately without a new permission prompt
-        setTimeout(() => {
-          restartPending.current = false;
-          if (dead || !enabledRef.current) return;
-          try {
-            r.start();
-          } catch (_) {
-            recRef.current = buildRec();
-            try { recRef.current.start(); } catch (__) {}
-          }
-        }, 150); // 150ms is enough — keepalive ensures instant reconnect
+        // Do NOT call setWakeListening(false) here — that causes the flicker.
+        // Chrome always fires onend after silence; we just silently restart.
+        if (deadRef.current || !enabledRef.current) {
+          setWakeListening(false);
+          return;
+        }
+        setTimeout(startRec, 100);
       };
 
-      return r;
+      try { r.start(); } catch (_) {}
     }
 
-    recRef.current = buildRec();
-    try { recRef.current.start(); } catch (_) {}
+    startRec();
 
     return () => {
-      dead = true;
-      restartPending.current = false;
+      deadRef.current = true;
       try { recRef.current?.stop(); } catch (_) {}
       recRef.current = null;
       clearT();
-      setWakeListening(false);
+      // wakeListening will be set false by the onend handler since deadRef is now true
       setCommandListening(false);
       cmdBuf.current = '';
       awaitingCmd.current = false;
@@ -472,7 +460,7 @@ function FloatingListener({
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([{
     id: '0', role: 'assistant',
-    content: 'ALPHA ONLINE. Mic is held open permanently — say "Alpha" followed by your command anytime.',
+    content: 'ALPHA ONLINE. Say "Alpha" followed by your command anytime.',
     timestamp: new Date(), model: 'claude-sonnet-4-6',
   }]);
   const [input, setInput] = useState('');
@@ -499,11 +487,7 @@ export default function Home() {
       .catch(() => setBackendStatus('offline'));
   }, []);
 
-  // Start mic keepalive as soon as component mounts (first interaction will
-  // resolve any permission prompt; AudioContext resumes on first user gesture)
   useEffect(() => {
-    // Browsers require a user gesture before AudioContext can start.
-    // We hook into the first click/keydown on the document.
     const onGesture = () => {
       startMicKeepalive();
       document.removeEventListener('click', onGesture);
