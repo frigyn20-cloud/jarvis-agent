@@ -195,7 +195,10 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
 }
 
 // ---------------------------------------------------------------------------
-// useWakeWord — SpeechRecognition only, no getUserMedia on load
+// useWakeWord
+// Waits for a user gesture (gestureReady) before starting SpeechRecognition.
+// This prevents browser crashes that happen when the speech API fires
+// immediately on page load without any prior user interaction.
 // ---------------------------------------------------------------------------
 function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: boolean) {
   const recRef = useRef<SpeechRecognition | null>(null);
@@ -210,10 +213,26 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
   const deadRef = useRef(false);
   const [wakeListening, setWakeListening] = useState(false);
   const [commandListening, setCommandListening] = useState(false);
+  // gestureReady: true once the user has clicked/typed anywhere on the page
+  const [gestureReady, setGestureReady] = useState(false);
 
   enabledRef.current = enabled;
   busyRef.current = busy;
   onCommandRef.current = onCommand;
+
+  // Listen for first user gesture globally
+  useEffect(() => {
+    if (gestureReady) return;
+    const mark = () => setGestureReady(true);
+    window.addEventListener('click', mark, { once: true });
+    window.addEventListener('keydown', mark, { once: true });
+    window.addEventListener('pointerdown', mark, { once: true });
+    return () => {
+      window.removeEventListener('click', mark);
+      window.removeEventListener('keydown', mark);
+      window.removeEventListener('pointerdown', mark);
+    };
+  }, [gestureReady]);
 
   const clearT = useCallback(() => {
     if (silenceT.current) { clearTimeout(silenceT.current); silenceT.current = null; }
@@ -243,12 +262,13 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
     prevBusy.current = busy;
   }, [busy, reset]);
 
+  // Only start SpeechRecognition once both enabled=true AND gestureReady=true
   useEffect(() => {
     const SR =
       (window as unknown as { SpeechRecognition?: typeof globalThis.SpeechRecognition }).SpeechRecognition ||
       (window as unknown as { webkitSpeechRecognition?: typeof globalThis.SpeechRecognition }).webkitSpeechRecognition;
 
-    if (!SR || !enabled) {
+    if (!SR || !enabled || !gestureReady) {
       deadRef.current = true;
       try { recRef.current?.stop(); } catch (_) {}
       recRef.current = null;
@@ -332,7 +352,7 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
       wakeLatched.current = false;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled]);
+  }, [enabled, gestureReady]);
 
   return { wakeListening, commandListening };
 }
@@ -399,7 +419,7 @@ function FloatingListener({
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([{
     id: '0', role: 'assistant',
-    content: 'ALPHA ONLINE. Click WAKE OFF to enable wake word, or type your question below.',
+    content: 'ALPHA ONLINE. Wake word is active — just say "Alpha" followed by your command.',
     timestamp: new Date(), model: 'claude-sonnet-4-6',
   }]);
   const [input, setInput] = useState('');
@@ -408,8 +428,9 @@ export default function Home() {
   const [listening, setListening] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
-  // Wake word starts OFF — user enables it after page loads to avoid crash on some browsers
-  const [wakeEnabled, setWakeEnabled] = useState(false);
+  // Wake ON by default — SpeechRecognition won't actually start until user
+  // makes a gesture (click/keypress), so no crash on load.
+  const [wakeEnabled, setWakeEnabled] = useState(true);
   const [activeModel, setActiveModel] = useState('claude-sonnet-4-6');
   const [lastHadImage, setLastHadImage] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
@@ -609,9 +630,6 @@ export default function Home() {
 
           {wakeListening && !commandListening && !isBusy && (
             <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: 'rgba(80,160,255,0.6)', textAlign: 'center', border: '1px solid rgba(80,160,255,0.15)', borderRadius: 4, padding: '4px 10px' }}>SAY &quot;ALPHA ...&quot; TO ACTIVATE</div>
-          )}
-          {!wakeEnabled && (
-            <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: 'var(--text-faint)', textAlign: 'center', border: '1px solid var(--border)', borderRadius: 4, padding: '4px 10px' }}>PRESS WAKE OFF TO ENABLE VOICE</div>
           )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', padding: '0 16px', marginTop: 8 }}>
