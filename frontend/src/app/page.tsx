@@ -6,7 +6,7 @@ import ChatWindow from '@/components/ChatWindow';
 const BACKEND = 'http://localhost:8000';
 const TTS_PLAYBACK_RATE = 1.15;
 const WAKE_WORD = 'alpha';
-const COMMAND_SILENCE_MS = 2500;
+const COMMAND_SILENCE_MS = 2200;
 const WAKE_ONLY_TIMEOUT_MS = 4000;
 const CHANNEL_NAME = 'alpha-wake-channel';
 
@@ -29,6 +29,67 @@ export interface Message {
   timestamp: Date;
   model?: string;
   hasImage?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Silent tab screenshot — uses html2canvas, NO permission dialog
+// ---------------------------------------------------------------------------
+let html2canvasLoaded = false;
+async function loadHtml2Canvas(): Promise<typeof import('html2canvas').default> {
+  if (!html2canvasLoaded) {
+    await new Promise<void>((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+      s.onload = () => { html2canvasLoaded = true; resolve(); };
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (window as unknown as { html2canvas: typeof import('html2canvas').default }).html2canvas;
+}
+
+async function captureCurrentTab(): Promise<string | null> {
+  try {
+    const h2c = await loadHtml2Canvas();
+    const canvas = await h2c(document.body, {
+      useCORS: true,
+      allowTaint: true,
+      scale: 1,
+      logging: false,
+      width: window.innerWidth,
+      height: window.innerHeight,
+      scrollX: 0,
+      scrollY: 0,
+    });
+    return canvas.toDataURL('image/png').split(',')[1];
+  } catch (e) {
+    console.error('html2canvas failed:', e);
+    // Fallback: getDisplayMedia (will prompt, but only if html2canvas fails)
+    return captureViaDisplayMedia();
+  }
+}
+
+async function captureViaDisplayMedia(): Promise<string | null> {
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: 1920, height: 1080 } as MediaTrackConstraints,
+      audio: false,
+    });
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    await new Promise<void>(resolve => { video.onloadedmetadata = () => resolve(); });
+    await video.play();
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d')!.drawImage(video, 0, 0);
+    stream.getTracks().forEach(t => t.stop());
+    return canvas.toDataURL('image/png').split(',')[1];
+  } catch (e) {
+    console.error('Screen capture failed:', e);
+    return null;
+  }
 }
 
 function AlphaOrb({ speaking, listening, wakeListening }: {
@@ -229,30 +290,8 @@ function MicButton({ listening, onClick, disabled }: {
   );
 }
 
-async function captureScreen(): Promise<string | null> {
-  try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { width: 1920, height: 1080 },
-      audio: false,
-    });
-    const video = document.createElement('video');
-    video.srcObject = stream;
-    await new Promise<void>(resolve => { video.onloadedmetadata = () => resolve(); });
-    await video.play();
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d')!.drawImage(video, 0, 0);
-    stream.getTracks().forEach(t => t.stop());
-    return canvas.toDataURL('image/png').split(',')[1];
-  } catch (e) {
-    console.error('Screen capture failed:', e);
-    return null;
-  }
-}
-
 // ---------------------------------------------------------------------------
-// useWakeWord — in-tab listener (fallback when popup not open)
+// useWakeWord — in-tab fallback listener
 // ---------------------------------------------------------------------------
 function useWakeWord(
   enabled: boolean,
@@ -262,6 +301,7 @@ function useWakeWord(
   const recognitionRef   = useRef<SpeechRecognition | null>(null);
   const commandBuffer    = useRef<string>('');
   const awaitingCommand  = useRef(false);
+  const wakeDetected     = useRef(false);
   const silenceTimer     = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wakeOnlyTimer    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [wakeListening,    setWakeListening]    = useState(false);
@@ -278,6 +318,7 @@ function useWakeWord(
     clearWakeOnlyTimer();
     commandBuffer.current   = '';
     awaitingCommand.current = false;
+    wakeDetected.current    = false;
     setCommandListening(false);
     if (runCommand) onCommand(runCommand);
   }, [onCommand]);
@@ -289,6 +330,7 @@ function useWakeWord(
       clearWakeOnlyTimer();
       commandBuffer.current   = '';
       awaitingCommand.current = false;
+      wakeDetected.current    = false;
       setCommandListening(false);
     }
     prevBusyRef.current = busy;
@@ -296,11 +338,8 @@ function useWakeWord(
 
   useEffect(() => {
     const SR =
-      (window as unknown as { SpeechRecognition?: typeof globalThis.SpeechRecognition })
-        .SpeechRecognition ||
-      (window as unknown as { webkitSpeechRecognition?: typeof globalThis.SpeechRecognition })
-        .webkitSpeechRecognition;
-
+      (window as unknown as { SpeechRecognition?: typeof globalThis.SpeechRecognition }).SpeechRecognition ||
+      (window as unknown as { webkitSpeechRecognition?: typeof globalThis.SpeechRecognition }).webkitSpeechRecognition;
     if (!SR) return;
 
     const rec = new SR();
@@ -317,7 +356,9 @@ function useWakeWord(
         const isFinal    = result.isFinal;
 
         if (!awaitingCommand.current) {
-          if (isFinal && transcript.includes(WAKE_WORD)) {
+          // detect wake on interim too
+          if (transcript.includes(WAKE_WORD) && !wakeDetected.current) {
+            wakeDetected.current  = true;
             awaitingCommand.current = true;
             setCommandListening(true);
             const afterWake = transcript.split(WAKE_WORD).slice(1).join(WAKE_WORD).trim();
@@ -333,9 +374,11 @@ function useWakeWord(
           }
         } else {
           if (isFinal) {
-            const spoken = result[0].transcript.trim();
-            if (spoken) {
-              commandBuffer.current += (commandBuffer.current ? ' ' : '') + spoken;
+            const clean = transcript.includes(WAKE_WORD)
+              ? transcript.split(WAKE_WORD).slice(1).join(WAKE_WORD).trim()
+              : result[0].transcript.trim();
+            if (clean) {
+              commandBuffer.current += (commandBuffer.current ? ' ' : '') + clean;
               clearWakeOnlyTimer();
               clearSilenceTimer();
               silenceTimer.current = setTimeout(() => resetCommandState(commandBuffer.current.trim()), COMMAND_SILENCE_MS);
@@ -400,7 +443,6 @@ export default function Home() {
       .catch(() => setBackendStatus('offline'));
   }, []);
 
-  // BroadcastChannel: receive commands from popup listener
   useEffect(() => {
     const ch = new BroadcastChannel(CHANNEL_NAME);
     channelRef.current = ch;
@@ -412,7 +454,6 @@ export default function Home() {
     return () => { ch.close(); channelRef.current = null; };
   }, []);
 
-  // Broadcast busy state to popup so it pauses during TTS/loading
   const isBusyRef = useRef(false);
   const broadcastBusy = useCallback((val: boolean) => {
     if (isBusyRef.current === val) return;
@@ -453,13 +494,14 @@ export default function Home() {
 
     if (isScreenRequest(text)) {
       setCapturing(true);
-      imageBase64 = await captureScreen();
+      // FIX 3: silent html2canvas screenshot, no permission prompt
+      imageBase64 = await captureCurrentTab();
       setCapturing(false);
       if (!imageBase64) {
         setMessages(prev => [...prev, {
           id: Date.now().toString(),
           role: 'assistant',
-          content: 'I was unable to capture your screen. Please allow screen sharing when prompted.',
+          content: 'I was unable to capture your screen, sir. Please ensure the page is fully loaded.',
           timestamp: new Date(),
         }]);
         return;
@@ -517,8 +559,6 @@ export default function Home() {
   useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
 
   const isBusy = loading || speaking || listening || capturing;
-
-  // Keep popup in sync with busy state
   useEffect(() => { broadcastBusy(isBusy); }, [isBusy, broadcastBusy]);
 
   const { wakeListening, commandListening } = useWakeWord(
@@ -527,17 +567,10 @@ export default function Home() {
     isBusy,
   );
 
-  // Pop-out listener window
   const openPopup = () => {
-    if (popupRef.current && !popupRef.current.closed) {
-      popupRef.current.focus();
-      return;
-    }
-    const w = window.open(
-      '/listener',
-      'alpha-listener',
-      'width=220,height=300,toolbar=0,menubar=0,scrollbars=0,resizable=0,alwaysOnTop=1'
-    );
+    if (popupRef.current && !popupRef.current.closed) { popupRef.current.focus(); return; }
+    const w = window.open('/listener', 'alpha-listener',
+      'width=220,height=320,toolbar=0,menubar=0,scrollbars=0,resizable=0,alwaysOnTop=1');
     if (w) {
       popupRef.current = w;
       setPopupOpen(true);
@@ -631,10 +664,7 @@ export default function Home() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <ModelBadge model={activeModel} hasImage={lastHadImage} />
 
-          {/* POP OUT button */}
-          <button
-            onClick={openPopup}
-            title="Open always-on listener popup (works across all tabs)"
+          <button onClick={openPopup} title="Open always-on listener popup"
             style={{
               background: popupOpen ? 'rgba(0,210,200,0.12)' : 'rgba(0,210,200,0.05)',
               border: `1px solid ${popupOpen ? 'rgba(0,210,200,0.5)' : 'rgba(0,210,200,0.2)'}`,
@@ -642,8 +672,7 @@ export default function Home() {
               fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
               color: popupOpen ? 'var(--primary)' : 'var(--text-muted)',
               display: 'flex', alignItems: 'center', gap: 5,
-            }}
-          >
+            }}>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
               <polyline points="15 3 21 3 21 9" />
@@ -652,9 +681,7 @@ export default function Home() {
             {popupOpen ? 'LISTENER ON' : 'POP OUT'}
           </button>
 
-          <button
-            onClick={() => setWakeEnabled(v => !v)}
-            title={wakeEnabled ? 'Disable wake word' : 'Enable wake word'}
+          <button onClick={() => setWakeEnabled(v => !v)}
             style={{
               background: wakeEnabled ? 'rgba(80,160,255,0.08)' : 'rgba(255,68,102,0.08)',
               border: `1px solid ${wakeEnabled ? 'rgba(80,160,255,0.3)' : 'rgba(255,68,102,0.25)'}`,
@@ -662,8 +689,7 @@ export default function Home() {
               fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
               color: wakeEnabled ? '#50a0ff' : 'var(--red)',
               display: 'flex', alignItems: 'center', gap: 5,
-            }}
-          >
+            }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <circle cx="12" cy="12" r="3" />
               <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
@@ -676,7 +702,6 @@ export default function Home() {
               setVoiceEnabled(v => !v);
               if (speaking && currentAudio.current) { currentAudio.current.pause(); setSpeaking(false); }
             }}
-            title={voiceEnabled ? 'Disable voice' : 'Enable voice'}
             style={{
               background: voiceEnabled ? 'rgba(0,210,200,0.08)' : 'rgba(255,68,102,0.08)',
               border: `1px solid ${voiceEnabled ? 'rgba(0,210,200,0.25)' : 'rgba(255,68,102,0.25)'}`,
@@ -684,13 +709,11 @@ export default function Home() {
               fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
               color: voiceEnabled ? 'var(--primary)' : 'var(--red)',
               display: 'flex', alignItems: 'center', gap: 5,
-            }}
-          >
+            }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               {voiceEnabled
                 ? <><path d="M11 5L6 9H2v6h4l5 4V5z" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /></>
-                : <><path d="M11 5L6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>
-              }
+                : <><path d="M11 5L6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>}
             </svg>
             {voiceEnabled ? 'VOICE ON' : 'VOICE OFF'}
           </button>
@@ -740,9 +763,7 @@ export default function Home() {
           </div>
 
           <div style={{ textAlign: 'center', fontFamily: 'Share Tech Mono, monospace', fontSize: 10, letterSpacing: '0.15em' }}>
-            <div style={{ color: statusColor, marginBottom: 4, transition: 'color 200ms ease' }}>
-              {statusLabel}
-            </div>
+            <div style={{ color: statusColor, marginBottom: 4, transition: 'color 200ms ease' }}>{statusLabel}</div>
             <div style={{ color: 'var(--text-faint)' }}>MNQ - MES FUTURES</div>
           </div>
 
@@ -751,22 +772,15 @@ export default function Home() {
               fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
               color: 'rgba(80,160,255,0.6)', textAlign: 'center',
               border: '1px solid rgba(80,160,255,0.15)', borderRadius: 4, padding: '4px 10px',
-            }}>
-              SAY &quot;ALPHA ...&quot; TO ACTIVATE
-            </div>
+            }}>SAY &quot;ALPHA ...&quot; TO ACTIVATE</div>
           )}
 
-          {/* Pop out hint */}
           {!popupOpen && (
-            <div
-              onClick={openPopup}
-              style={{
-                fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.08em',
-                color: 'var(--text-faint)', textAlign: 'center', cursor: 'pointer',
-                border: '1px dashed rgba(0,210,200,0.15)', borderRadius: 4, padding: '5px 10px',
-                maxWidth: 180,
-              }}
-            >
+            <div onClick={openPopup} style={{
+              fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.08em',
+              color: 'var(--text-faint)', textAlign: 'center', cursor: 'pointer',
+              border: '1px dashed rgba(0,210,200,0.15)', borderRadius: 4, padding: '5px 10px', maxWidth: 180,
+            }}>
               <span style={{ color: 'var(--primary)' }}>POP OUT</span> for cross-tab listening
             </div>
           )}
@@ -778,8 +792,7 @@ export default function Home() {
               'Alpha, look at my screen',
               'Alpha, pre-market analysis',
             ].map(prompt => (
-              <button
-                key={prompt}
+              <button key={prompt}
                 onClick={() => { setInput(prompt); setTimeout(() => inputRef.current?.focus(), 50); }}
                 style={{
                   background: 'rgba(0,210,200,0.04)', border: '1px solid var(--border)',
@@ -787,17 +800,9 @@ export default function Home() {
                   fontSize: 10, fontFamily: 'Share Tech Mono, monospace',
                   letterSpacing: '0.05em', cursor: 'pointer', textAlign: 'left', transition: 'all 150ms ease',
                 }}
-                onMouseEnter={e => {
-                  (e.target as HTMLElement).style.borderColor = 'var(--primary)';
-                  (e.target as HTMLElement).style.color = 'var(--primary)';
-                }}
-                onMouseLeave={e => {
-                  (e.target as HTMLElement).style.borderColor = 'var(--border)';
-                  (e.target as HTMLElement).style.color = 'var(--text-muted)';
-                }}
-              >
-                &gt; {prompt}
-              </button>
+                onMouseEnter={e => { (e.target as HTMLElement).style.borderColor = 'var(--primary)'; (e.target as HTMLElement).style.color = 'var(--primary)'; }}
+                onMouseLeave={e => { (e.target as HTMLElement).style.borderColor = 'var(--border)'; (e.target as HTMLElement).style.color = 'var(--text-muted)'; }}
+              >&gt; {prompt}</button>
             ))}
           </div>
         </div>
@@ -816,9 +821,7 @@ export default function Home() {
                 fontFamily: 'Share Tech Mono, monospace', fontSize: 13,
                 alignSelf: 'flex-end', paddingBottom: 1,
               }}>{'>'}</span>
-              <textarea
-                ref={inputRef}
-                value={input}
+              <textarea ref={inputRef} value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder='Ask Alpha anything... or say "Alpha, look at my screen"'
@@ -830,8 +833,7 @@ export default function Home() {
                 }}
               />
               <MicButton listening={listening} onClick={toggleMic} disabled={loading || speaking || capturing} />
-              <button
-                onClick={() => sendMessage()}
+              <button onClick={() => sendMessage()}
                 disabled={loading || !input.trim() || capturing}
                 style={{
                   background: loading || !input.trim() ? 'rgba(0,210,200,0.08)' : 'rgba(0,210,200,0.15)',
@@ -841,17 +843,14 @@ export default function Home() {
                   cursor: loading || !input.trim() ? 'not-allowed' : 'pointer',
                   fontFamily: 'Orbitron, monospace', fontWeight: 500, fontSize: 10,
                   letterSpacing: '0.15em', transition: 'all 150ms ease', alignSelf: 'flex-end',
-                }}
-              >
+                }}>
                 {capturing ? 'CAPTURING' : loading ? '...' : 'SEND'}
               </button>
             </div>
             <p style={{
               fontSize: 10, color: 'var(--text-faint)', marginTop: 6,
               textAlign: 'center', fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em',
-            }}>
-              ALPHA v1.0 - LOCAL - NOT FINANCIAL ADVICE
-            </p>
+            }}>ALPHA v1.0 - LOCAL - NOT FINANCIAL ADVICE</p>
           </div>
         </div>
       </div>
