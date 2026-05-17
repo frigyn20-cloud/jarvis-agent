@@ -8,25 +8,18 @@ const COMMAND_SILENCE_MS = 2500;
 const WAKE_ONLY_TIMEOUT_MS = 5000;
 const CHANNEL_NAME = 'alpha-wake-channel';
 
-// Normalize transcript: lowercase, strip punctuation, collapse spaces
 function norm(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim();
 }
-
-// Returns true if the normalized transcript contains the wake word or a known variant
 function hasWake(raw: string): boolean {
   const n = norm(raw);
   return n.includes(WAKE_WORD) || WAKE_ALTS.some(a => n.includes(a));
 }
-
-// Returns the text after the wake word (or variant), or '' if none
 function afterWake(raw: string): string {
   const n = norm(raw);
   for (const w of [WAKE_WORD, ...WAKE_ALTS]) {
     const idx = n.indexOf(w);
-    if (idx !== -1) {
-      return n.slice(idx + w.length).trim();
-    }
+    if (idx !== -1) return n.slice(idx + w.length).trim();
   }
   return '';
 }
@@ -121,28 +114,32 @@ export default function ListenerPage() {
   const [active,  setActive]  = useState(false);
   const [error,   setError]   = useState('');
 
-  // All mutable state in refs so closures never go stale
-  const activeRef     = useRef(false);
-  const channelRef    = useRef<BroadcastChannel | null>(null);
-  const recRef        = useRef<SpeechRecognition | null>(null);
-  const cmdBuf        = useRef('');
-  const awaitingCmd   = useRef(false);
-  const wakeLatched   = useRef(false);
-  const busyRef       = useRef(false);
-  const silenceT      = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wakeOnlyT     = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Setter refs so closures can call React state setters without captures
+  const activeRef        = useRef(false);
+  const channelRef       = useRef<BroadcastChannel | null>(null);
+  const recRef           = useRef<SpeechRecognition | null>(null);
+  const cmdBuf           = useRef('');
+  const awaitingCmd      = useRef(false);
+  const wakeLatched      = useRef(false);
+  const busyRef          = useRef(false);
+  const silenceT         = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wakeOnlyT        = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Guard: prevents onend from scheduling a restart while one is already pending
+  const restartPending   = useRef(false);
+  // Guard: set true permanently when mic is denied so we never try again
+  const micDenied        = useRef(false);
+
+  // Stable setter refs — never go stale in closures
   const setStatusRef  = useRef(setStatus);
   const setLastCmdRef = useRef(setLastCmd);
-  useEffect(() => { setStatusRef.current = setStatus; }, []);
-  useEffect(() => { setLastCmdRef.current = setLastCmd; }, []);
+  const setActiveRef  = useRef(setActive);
+  const setErrorRef   = useRef(setError);
 
   const clearT = () => {
     if (silenceT.current)  { clearTimeout(silenceT.current);  silenceT.current  = null; }
     if (wakeOnlyT.current) { clearTimeout(wakeOnlyT.current); wakeOnlyT.current = null; }
   };
 
-  const reset = () => {
+  const resetState = () => {
     clearT();
     cmdBuf.current      = '';
     awaitingCmd.current = false;
@@ -155,68 +152,76 @@ export default function ListenerPage() {
     cmdBuf.current      = '';
     awaitingCmd.current = false;
     wakeLatched.current = false;
-    if (!cmd.trim()) { reset(); return; }
+    if (!cmd.trim()) { resetState(); return; }
     channelRef.current?.postMessage({ type: 'command', text: cmd.trim() });
     setLastCmdRef.current(cmd.trim());
     setStatusRef.current('sent');
     setTimeout(() => { if (activeRef.current) setStatusRef.current('wake'); }, 1800);
   };
 
-  // BroadcastChannel: receive busy signal from main window
+  // BroadcastChannel — receive busy signal from main window
   useEffect(() => {
     const ch = new BroadcastChannel(CHANNEL_NAME);
     channelRef.current = ch;
     ch.onmessage = (e) => {
       if (e.data?.type !== 'busy') return;
       busyRef.current = !!e.data.value;
-      // When main goes idle again, reset our command state
-      if (!e.data.value) reset();
+      if (!e.data.value) resetState();
     };
     return () => { ch.close(); channelRef.current = null; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const startListening = () => {
+  // ---------------------------------------------------------------------------
+  // Core: build and start a SpeechRecognition instance.
+  // IMPORTANT: never call this recursively from onend — use safeRestart() instead.
+  // ---------------------------------------------------------------------------
+  const buildAndStart = () => {
+    if (micDenied.current) return;
+
     const SR =
       (window as unknown as { SpeechRecognition?: typeof globalThis.SpeechRecognition }).SpeechRecognition ||
       (window as unknown as { webkitSpeechRecognition?: typeof globalThis.SpeechRecognition }).webkitSpeechRecognition;
-    if (!SR) { setError('SpeechRecognition not supported in this browser.'); return; }
+    if (!SR) {
+      setErrorRef.current('SpeechRecognition not supported in this browser.');
+      return;
+    }
 
-    setError('');
+    // Tear down previous instance cleanly before creating a new one
+    if (recRef.current) {
+      try { recRef.current.onend = null; recRef.current.stop(); } catch (_) {}
+      recRef.current = null;
+    }
+
     const rec = new SR();
-    rec.continuous     = true;
-    rec.interimResults = true;
-    rec.lang           = 'en-US';
-    rec.maxAlternatives = 3;  // check top-3 alternatives for wake word
-    recRef.current = rec;
+    rec.continuous      = true;
+    rec.interimResults  = true;
+    rec.lang            = 'en-US';
+    rec.maxAlternatives = 3;
+    recRef.current      = rec;
 
     rec.onstart = () => {
-      activeRef.current = true;
-      setActive(true);
+      restartPending.current = false;
+      activeRef.current      = true;
+      setActiveRef.current(true);
       setStatusRef.current('wake');
     };
 
     rec.onresult = (event: SpeechRecognitionEvent) => {
-      // Never process results while main window is busy
       if (busyRef.current) return;
 
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result  = event.results[i];
         const isFinal = result.isFinal;
 
-        // Build a combined string from all alternatives for better matching
         let combined = '';
-        for (let a = 0; a < result.length; a++) {
-          combined += ' ' + result[a].transcript;
-        }
+        for (let a = 0; a < result.length; a++) combined += ' ' + result[a].transcript;
 
         if (!awaitingCmd.current) {
-          // Detect wake on BOTH interim and final — first match wins
           if (hasWake(combined) && !wakeLatched.current) {
             wakeLatched.current  = true;
             awaitingCmd.current  = true;
             setStatusRef.current('command');
-
             const tail = afterWake(combined).trim();
             if (tail) {
               cmdBuf.current = tail;
@@ -224,66 +229,90 @@ export default function ListenerPage() {
               silenceT.current = setTimeout(() => dispatch(cmdBuf.current), COMMAND_SILENCE_MS);
             } else {
               clearT();
-              wakeOnlyT.current = setTimeout(reset, WAKE_ONLY_TIMEOUT_MS);
+              wakeOnlyT.current = setTimeout(resetState, WAKE_ONLY_TIMEOUT_MS);
             }
           }
-        } else {
-          // In command mode — only append final results
-          if (isFinal) {
-            // Strip wake word if it appears again (e.g. "alpha alpha what's MNQ doing")
-            const raw  = result[0].transcript;
-            const text = hasWake(raw) ? afterWake(raw) : raw.trim();
-            if (text) {
-              cmdBuf.current += (cmdBuf.current ? ' ' : '') + text;
-              clearT();
-              silenceT.current = setTimeout(() => dispatch(cmdBuf.current), COMMAND_SILENCE_MS);
-            }
+        } else if (isFinal) {
+          const raw  = result[0].transcript;
+          const text = hasWake(raw) ? afterWake(raw) : raw.trim();
+          if (text) {
+            cmdBuf.current += (cmdBuf.current ? ' ' : '') + text;
+            clearT();
+            silenceT.current = setTimeout(() => dispatch(cmdBuf.current), COMMAND_SILENCE_MS);
           }
         }
       }
     };
 
-    // Auto-restart: Chrome kills recognition after ~60s silence or on network hiccups
-    rec.onend = () => {
-      if (!activeRef.current) return;
-      // Small delay prevents rapid restart loops on immediate errors
+    // safeRestart: schedule ONE restart, never recurse
+    const safeRestart = () => {
+      if (!activeRef.current || restartPending.current || micDenied.current) return;
+      restartPending.current = true;
       setTimeout(() => {
-        if (!activeRef.current) return;
-        try { rec.start(); } catch (_) {
-          // If old instance is dead, create a fresh one
-          startListening();
+        restartPending.current = false;
+        if (!activeRef.current || micDenied.current) return;
+        // Try to restart the same instance first; if it throws, build a new one
+        try {
+          rec.start();
+        } catch (_) {
+          buildAndStart();
         }
-      }, 300);
+      }, 500);
+    };
+
+    rec.onend = () => {
+      // Only restart if the user hasn't clicked STOP
+      if (activeRef.current) safeRestart();
     };
 
     rec.onerror = (e: SpeechRecognitionErrorEvent) => {
-      if (e.error === 'no-speech' || e.error === 'aborted') return;
+      if (e.error === 'no-speech') return; // normal; onend will restart
+      if (e.error === 'aborted')   return; // we triggered it; onend will handle
+
       if (e.error === 'not-allowed') {
-        setError('Microphone blocked. Allow mic access and try again.');
+        micDenied.current = true;
         activeRef.current = false;
-        setActive(false);
+        setActiveRef.current(false);
         setStatusRef.current('idle');
+        setErrorRef.current('Microphone blocked. Allow mic access in your browser settings, then reopen this window.');
         return;
       }
-      console.warn('Listener error:', e.error);
+
+      if (e.error === 'network') {
+        setErrorRef.current('Network error — retrying…');
+        // onend fires after this and safeRestart will rebuild
+        return;
+      }
+
+      console.warn('Listener SpeechRecognition error:', e.error);
     };
 
     try {
       rec.start();
-      // onstart will set activeRef and status
-    } catch (e) {
-      console.error('rec.start() threw:', e);
-      setError('Failed to start microphone.');
+    } catch (err) {
+      console.error('rec.start() threw:', err);
+      setErrorRef.current('Failed to start microphone.');
     }
   };
 
+  const startListening = () => {
+    if (micDenied.current) {
+      setError('Mic access denied. Allow it in browser settings and reopen this window.');
+      return;
+    }
+    setError('');
+    activeRef.current = true;
+    buildAndStart();
+  };
+
   const stopListening = () => {
-    activeRef.current = false;
+    activeRef.current      = false;
+    restartPending.current = false;
+    clearT();
     try { recRef.current?.stop(); } catch (_) {}
     recRef.current = null;
-    clearT();
     setActive(false);
-    setStatusRef.current('idle');
+    setStatus('idle');
   };
 
   const statusText =
@@ -315,7 +344,7 @@ export default function ListenerPage() {
       </div>
 
       {error && (
-        <div style={{ fontSize: 9, color: '#ff4466', textAlign: 'center', maxWidth: 180, letterSpacing: '0.05em' }}>
+        <div style={{ fontSize: 9, color: '#ff4466', textAlign: 'center', maxWidth: 180, letterSpacing: '0.05em', padding: '0 12px' }}>
           {error}
         </div>
       )}
@@ -335,7 +364,7 @@ export default function ListenerPage() {
       )}
 
       <div style={{ fontSize: 8, color: '#2a4045', letterSpacing: '0.08em', textAlign: 'center' }}>
-        Say \u201cAlpha\u201d + command
+        Say &ldquo;Alpha&rdquo; + command
       </div>
     </div>
   );
