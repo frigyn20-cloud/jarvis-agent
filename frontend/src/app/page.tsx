@@ -195,10 +195,7 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
 }
 
 // ---------------------------------------------------------------------------
-// useWakeWord
-// SpeechRecognition only — no getUserMedia, no AudioContext, no keepalive.
-// Chrome always fires onend after silence; we restart silently so the
-// wake indicator stays on continuously from the user's perspective.
+// useWakeWord — SpeechRecognition only, no getUserMedia on load
 // ---------------------------------------------------------------------------
 function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: boolean) {
   const recRef = useRef<SpeechRecognition | null>(null);
@@ -261,12 +258,10 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
     }
 
     deadRef.current = false;
-    // Show the wake indicator immediately — stays on until disabled
     setWakeListening(true);
 
     function startRec() {
       if (deadRef.current || !enabledRef.current) return;
-
       const r = new SR!();
       r.continuous = true;
       r.interimResults = true;
@@ -281,7 +276,6 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
           const isFinal = result.isFinal;
           let combined = '';
           for (let a = 0; a < result.length; a++) combined += ' ' + result[a].transcript;
-
           if (!awaitingCmd.current) {
             if (hasWake(combined) && !wakeLatched.current) {
               wakeLatched.current = true;
@@ -314,9 +308,6 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
         console.warn('Wake word error:', e.error);
       };
 
-      // Chrome always fires onend after silence even with continuous=true.
-      // Do NOT set wakeListening=false here — that causes the flicker.
-      // Just restart silently so the indicator stays blue.
       r.onend = () => {
         if (deadRef.current || !enabledRef.current) {
           setWakeListening(false);
@@ -386,24 +377,9 @@ function FloatingListener({
   const dotColor = orbState === 'command' ? '#50dc78' : orbState === 'wake' ? 'rgba(80,160,255,0.9)' : '#555';
 
   return (
-    <div
-      onMouseDown={onMouseDown}
-      style={{
-        position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000,
-        width: 160, background: 'rgba(7,21,24,0.97)',
-        border: '1px solid rgba(0,210,200,0.35)', borderRadius: 8,
-        boxShadow: '0 8px 32px rgba(0,0,0,0.6)', cursor: 'grab',
-        display: 'flex', flexDirection: 'column', alignItems: 'center',
-        padding: '10px 0 12px', gap: 6, userSelect: 'none',
-        backdropFilter: 'blur(12px)',
-      }}
-    >
+    <div onMouseDown={onMouseDown} style={{ position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000, width: 160, background: 'rgba(7,21,24,0.97)', border: '1px solid rgba(0,210,200,0.35)', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.6)', cursor: 'grab', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '10px 0 12px', gap: 6, userSelect: 'none', backdropFilter: 'blur(12px)' }}>
       <div style={{ width: 32, height: 3, borderRadius: 2, background: 'rgba(0,210,200,0.3)', marginBottom: 2 }} />
-      <button
-        onClick={onClose}
-        style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0 }}
-        title="Close floating listener"
-      >✕</button>
+      <button onClick={onClose} style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0 }} title="Close floating listener">✕</button>
       <AlphaOrb speaking={speaking} listening={commandListening || listening} wakeListening={wakeListening && !commandListening && !listening} size={100} />
       <div style={{ fontSize: 9, letterSpacing: '0.2em', color: '#00d2c8', fontFamily: 'monospace', fontWeight: 700, marginTop: -4 }}>ALPHA</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -411,7 +387,7 @@ function FloatingListener({
         <span style={{ fontSize: 8, letterSpacing: '0.12em', color: statusColor, fontFamily: 'monospace' }}>{statusLabel}</span>
       </div>
       {!isBusy && wakeListening && !commandListening && (
-        <div style={{ fontSize: 7, color: 'rgba(80,160,255,0.6)', fontFamily: 'monospace', letterSpacing: '0.08em', textAlign: 'center', padding: '0 8px' }}>say &ldquo;Alpha…&rdquo;</div>
+        <div style={{ fontSize: 7, color: 'rgba(80,160,255,0.6)', fontFamily: 'monospace', letterSpacing: '0.08em', textAlign: 'center', padding: '0 8px' }}>say “Alpha…”</div>
       )}
     </div>
   );
@@ -423,7 +399,7 @@ function FloatingListener({
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([{
     id: '0', role: 'assistant',
-    content: 'ALPHA ONLINE. Say "Alpha" followed by your command anytime.',
+    content: 'ALPHA ONLINE. Click WAKE OFF to enable wake word, or type your question below.',
     timestamp: new Date(), model: 'claude-sonnet-4-6',
   }]);
   const [input, setInput] = useState('');
@@ -432,7 +408,8 @@ export default function Home() {
   const [listening, setListening] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [wakeEnabled, setWakeEnabled] = useState(true);
+  // Wake word starts OFF — user enables it after page loads to avoid crash on some browsers
+  const [wakeEnabled, setWakeEnabled] = useState(false);
   const [activeModel, setActiveModel] = useState('claude-sonnet-4-6');
   const [lastHadImage, setLastHadImage] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
@@ -580,16 +557,14 @@ export default function Home() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <ModelBadge model={activeModel} hasImage={lastHadImage} />
 
-          <button
-            onClick={() => setFloatOpen(v => !v)}
-            title="Pin a floating mini-orb on screen"
-            style={{ background: floatOpen ? 'rgba(0,210,200,0.12)' : 'rgba(0,210,200,0.05)', border: `1px solid ${floatOpen ? 'rgba(0,210,200,0.5)' : 'rgba(0,210,200,0.2)'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: floatOpen ? 'var(--primary)' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}
-          >
+          <button onClick={() => setFloatOpen(v => !v)} title="Pin a floating mini-orb on screen"
+            style={{ background: floatOpen ? 'rgba(0,210,200,0.12)' : 'rgba(0,210,200,0.05)', border: `1px solid ${floatOpen ? 'rgba(0,210,200,0.5)' : 'rgba(0,210,200,0.2)'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: floatOpen ? 'var(--primary)' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="5" r="3" /><path d="M12 8v13" /><path d="M5 14l7-6 7 6" /></svg>
             {floatOpen ? 'FLOAT ON' : 'FLOAT'}
           </button>
 
-          <button onClick={() => setWakeEnabled(v => !v)} style={{ background: wakeEnabled ? 'rgba(80,160,255,0.08)' : 'rgba(255,68,102,0.08)', border: `1px solid ${wakeEnabled ? 'rgba(80,160,255,0.3)' : 'rgba(255,68,102,0.25)'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: wakeEnabled ? '#50a0ff' : 'var(--red)', display: 'flex', alignItems: 'center', gap: 5 }}>
+          <button onClick={() => setWakeEnabled(v => !v)}
+            style={{ background: wakeEnabled ? 'rgba(80,160,255,0.08)' : 'rgba(255,68,102,0.08)', border: `1px solid ${wakeEnabled ? 'rgba(80,160,255,0.3)' : 'rgba(255,68,102,0.25)'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: wakeEnabled ? '#50a0ff' : 'var(--red)', display: 'flex', alignItems: 'center', gap: 5 }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3" /><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" /></svg>
             WAKE {wakeEnabled ? 'ON' : 'OFF'}
           </button>
@@ -635,6 +610,9 @@ export default function Home() {
           {wakeListening && !commandListening && !isBusy && (
             <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: 'rgba(80,160,255,0.6)', textAlign: 'center', border: '1px solid rgba(80,160,255,0.15)', borderRadius: 4, padding: '4px 10px' }}>SAY &quot;ALPHA ...&quot; TO ACTIVATE</div>
           )}
+          {!wakeEnabled && (
+            <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: 'var(--text-faint)', textAlign: 'center', border: '1px solid var(--border)', borderRadius: 4, padding: '4px 10px' }}>PRESS WAKE OFF TO ENABLE VOICE</div>
+          )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', padding: '0 16px', marginTop: 8 }}>
             {['Alpha, MNQ market outlook', 'Alpha, key support levels', 'Alpha, look at my screen', 'Alpha, pre-market analysis'].map(prompt => (
@@ -667,16 +645,7 @@ export default function Home() {
       </div>
 
       {floatOpen && (
-        <FloatingListener
-          speaking={speaking}
-          listening={listening}
-          commandListening={commandListening}
-          wakeListening={wakeListening}
-          isBusy={isBusy}
-          statusLabel={statusLabel}
-          statusColor={statusColor}
-          onClose={() => setFloatOpen(false)}
-        />
+        <FloatingListener speaking={speaking} listening={listening} commandListening={commandListening} wakeListening={wakeListening} isBusy={isBusy} statusLabel={statusLabel} statusColor={statusColor} onClose={() => setFloatOpen(false)} />
       )}
     </div>
   );
