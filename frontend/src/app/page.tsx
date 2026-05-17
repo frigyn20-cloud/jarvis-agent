@@ -10,6 +10,7 @@ const WAKE_ALTS = ['alfa', 'elfa', 'alva', 'alvah', 'alphas'];
 const COMMAND_SILENCE_MS = 2500;
 const WAKE_ONLY_TIMEOUT_MS = 5000;
 const MARKET_POLL_MS = 30_000;
+const ALERT_POLL_MS  = 15_000;
 
 const SCREEN_TRIGGERS = [
   'look at my screen', 'what do you see', 'analyze my chart',
@@ -47,6 +48,23 @@ interface MarketSnapshot {
   [key: string]: QuoteData | undefined;
 }
 
+interface SetupConditions {
+  bias: boolean;
+  liq_draw: boolean;
+  ifvg: boolean;
+}
+
+interface SetupStatus {
+  symbol: string;
+  bias: 'bullish' | 'bearish' | 'neutral';
+  score: number;
+  conditions: SetupConditions;
+  liq_draw: { price: number; kind: string; timeframe: string } | null;
+  entry_fvg: { top: number; bottom: number; timeframe: string; inversed: boolean } | null;
+  alert_text: string;
+  timestamp: string;
+}
+
 function normT(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim();
 }
@@ -64,31 +82,22 @@ function afterWakeText(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Screen capture — locked tab stream
+// Screen capture
 // ---------------------------------------------------------------------------
 let lockedStream: MediaStream | null = null;
-
 function releaseLocked() {
-  if (lockedStream) {
-    lockedStream.getTracks().forEach(t => t.stop());
-    lockedStream = null;
-  }
+  if (lockedStream) { lockedStream.getTracks().forEach(t => t.stop()); lockedStream = null; }
 }
-
 async function acquireStream(): Promise<MediaStream | null> {
   try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({
+    return await navigator.mediaDevices.getDisplayMedia({
       video: { width: 1920, height: 1080 } as MediaTrackConstraints,
       audio: false,
-      // @ts-expect-error — non-standard but supported in Chrome 94+
+      // @ts-expect-error
       preferCurrentTab: false,
     });
-    return stream;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
-
 async function frameFromStream(stream: MediaStream): Promise<string | null> {
   const track = stream.getVideoTracks()[0];
   if (!track || track.readyState === 'ended') return null;
@@ -112,7 +121,6 @@ async function frameFromStream(stream: MediaStream): Promise<string | null> {
     return canvas.toDataURL('image/png').split(',')[1];
   }
 }
-
 async function captureScreen(): Promise<string | null> {
   if (lockedStream) {
     const track = lockedStream.getVideoTracks()[0];
@@ -125,7 +133,6 @@ async function captureScreen(): Promise<string | null> {
   stream.getTracks().forEach(t => t.stop());
   return frame;
 }
-
 async function lockChartTab(): Promise<boolean> {
   releaseLocked();
   const stream = await acquireStream();
@@ -136,7 +143,7 @@ async function lockChartTab(): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// AlphaOrb canvas
+// AlphaOrb
 // ---------------------------------------------------------------------------
 function AlphaOrb({ speaking, listening, wakeListening, size = 220 }: { speaking: boolean; listening: boolean; wakeListening: boolean; size?: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -205,15 +212,7 @@ function AlphaOrb({ speaking, listening, wakeListening, size = 220 }: { speaking
 
 function HudCorner({ pos }: { pos: 'tl' | 'tr' | 'bl' | 'br' }) {
   const size = 14;
-  return <div style={{
-    position: 'absolute', width: size, height: size,
-    top: pos.startsWith('t') ? 0 : undefined, bottom: pos.startsWith('b') ? 0 : undefined,
-    left: pos.endsWith('l') ? 0 : undefined, right: pos.endsWith('r') ? 0 : undefined,
-    borderTop: pos.startsWith('t') ? '1.5px solid var(--primary)' : undefined,
-    borderBottom: pos.startsWith('b') ? '1.5px solid var(--primary)' : undefined,
-    borderLeft: pos.endsWith('l') ? '1.5px solid var(--primary)' : undefined,
-    borderRight: pos.endsWith('r') ? '1.5px solid var(--primary)' : undefined,
-  }} />;
+  return <div style={{ position: 'absolute', width: size, height: size, top: pos.startsWith('t') ? 0 : undefined, bottom: pos.startsWith('b') ? 0 : undefined, left: pos.endsWith('l') ? 0 : undefined, right: pos.endsWith('r') ? 0 : undefined, borderTop: pos.startsWith('t') ? '1.5px solid var(--primary)' : undefined, borderBottom: pos.startsWith('b') ? '1.5px solid var(--primary)' : undefined, borderLeft: pos.endsWith('l') ? '1.5px solid var(--primary)' : undefined, borderRight: pos.endsWith('r') ? '1.5px solid var(--primary)' : undefined }} />;
 }
 
 function ModelBadge({ model, hasImage }: { model: string; hasImage?: boolean }) {
@@ -242,7 +241,7 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
 }
 
 // ---------------------------------------------------------------------------
-// Live ticker component
+// Live ticker
 // ---------------------------------------------------------------------------
 function LiveTicker({ snapshot }: { snapshot: MarketSnapshot }) {
   const symbols: (keyof MarketSnapshot)[] = ['MNQ', 'MES', 'VIX'];
@@ -268,6 +267,56 @@ function LiveTicker({ snapshot }: { snapshot: MarketSnapshot }) {
           </span>
         );
       })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Setup Panel — PB Blake conditions
+// ---------------------------------------------------------------------------
+function SetupPanel({ mnq, mes }: { mnq: SetupStatus | null; mes: SetupStatus | null }) {
+  const renderSetup = (s: SetupStatus | null, label: string) => {
+    if (!s) return (
+      <div style={{ opacity: 0.4, fontSize: 9, fontFamily: 'Share Tech Mono, monospace', color: 'var(--text-faint)' }}>{label}: NO DATA</div>
+    );
+    const biasColor = s.bias === 'bullish' ? '#50dc78' : s.bias === 'bearish' ? 'var(--red)' : 'var(--text-muted)';
+    const scoreColor = s.score === 3 ? '#ffd700' : s.score === 2 ? '#50a0ff' : s.score === 1 ? 'var(--primary)' : 'var(--text-faint)';
+    const dot = (on: boolean) => (
+      <span style={{ width: 6, height: 6, borderRadius: '50%', background: on ? '#50dc78' : 'rgba(255,255,255,0.1)', display: 'inline-block', marginRight: 4, boxShadow: on ? '0 0 4px #50dc78' : 'none' }} />
+    );
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontSize: 10, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: 'var(--text-muted)' }}>{label}</span>
+          <span style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', color: biasColor, letterSpacing: '0.1em' }}>{s.bias.toUpperCase()}</span>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', color: 'var(--text-muted)' }}>{dot(s.conditions.bias)}BIAS ({s.score >= 1 ? '4H/1H ✓' : 'no structure'})</div>
+          <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', color: 'var(--text-muted)' }}>
+            {dot(s.conditions.liq_draw)}LIQ DRAW {s.liq_draw ? `@ ${s.liq_draw.price.toLocaleString(undefined, {minimumFractionDigits:2})} (${s.liq_draw.timeframe})` : '(none)'}
+          </div>
+          <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', color: 'var(--text-muted)' }}>
+            {dot(s.conditions.ifvg)}iFVG {s.entry_fvg ? `${s.entry_fvg.bottom.toFixed(2)}-${s.entry_fvg.top.toFixed(2)} (${s.entry_fvg.timeframe})` : '(none)'}
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+          {[0,1,2].map(i => (
+            <div key={i} style={{ flex: 1, height: 3, borderRadius: 2, background: i < s.score ? scoreColor : 'rgba(255,255,255,0.08)', transition: 'background 300ms ease' }} />
+          ))}
+          <span style={{ fontSize: 8, fontFamily: 'Share Tech Mono, monospace', color: scoreColor }}>{s.score}/3</span>
+        </div>
+        {s.score === 3 && (
+          <div style={{ fontSize: 8, fontFamily: 'Share Tech Mono, monospace', color: '#ffd700', letterSpacing: '0.1em', padding: '3px 6px', border: '1px solid rgba(255,215,0,0.3)', borderRadius: 3, background: 'rgba(255,215,0,0.06)', marginTop: 2 }}>⚡ SETUP COMPLETE</div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ padding: '0 16px', width: '100%', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.2em', color: 'var(--text-faint)', borderBottom: '1px solid var(--border)', paddingBottom: 4 }}>PB BLAKE DETECTOR</div>
+      {renderSetup(mnq, 'MNQ')}
+      {renderSetup(mes, 'MES')}
     </div>
   );
 }
@@ -410,7 +459,7 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
 }
 
 // ---------------------------------------------------------------------------
-// Draggable floating listener widget
+// FloatingListener
 // ---------------------------------------------------------------------------
 function FloatingListener({
   speaking, listening, commandListening, wakeListening, isBusy, statusLabel, statusColor, onClose,
@@ -420,30 +469,23 @@ function FloatingListener({
 }) {
   const [pos, setPos] = useState({ x: window.innerWidth - 200, y: 80 });
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
-
   const onMouseDown = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest('button')) return;
     dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y };
     e.preventDefault();
   };
-
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (!dragRef.current) return;
       const dx = e.clientX - dragRef.current.startX, dy = e.clientY - dragRef.current.startY;
-      setPos({
-        x: Math.max(0, Math.min(window.innerWidth - 160, dragRef.current.origX + dx)),
-        y: Math.max(0, Math.min(window.innerHeight - 200, dragRef.current.origY + dy)),
-      });
+      setPos({ x: Math.max(0, Math.min(window.innerWidth - 160, dragRef.current.origX + dx)), y: Math.max(0, Math.min(window.innerHeight - 200, dragRef.current.origY + dy)) });
     };
     const onUp = () => { dragRef.current = null; };
     window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
   }, []);
-
   const orbState = commandListening || listening ? 'command' : wakeListening ? 'wake' : 'idle';
   const dotColor = orbState === 'command' ? '#50dc78' : orbState === 'wake' ? 'rgba(80,160,255,0.9)' : '#555';
-
   return (
     <div onMouseDown={onMouseDown} style={{ position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000, width: 160, background: 'rgba(7,21,24,0.97)', border: '1px solid rgba(0,210,200,0.35)', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.6)', cursor: 'grab', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '10px 0 12px', gap: 6, userSelect: 'none', backdropFilter: 'blur(12px)' }}>
       <div style={{ width: 32, height: 3, borderRadius: 2, background: 'rgba(0,210,200,0.3)', marginBottom: 2 }} />
@@ -467,7 +509,7 @@ function FloatingListener({
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([{
     id: '0', role: 'assistant',
-    content: 'ALPHA ONLINE. Click "CHART TAB" in the header to lock onto your TradingView tab, then say "Alpha, analyze my chart" anytime.',
+    content: 'ALPHA ONLINE. PB Blake detector active. I will alert you automatically when all three conditions align on MNQ or MES.',
     timestamp: new Date(), model: 'claude-sonnet-4-6',
   }]);
   const [input, setInput] = useState('');
@@ -483,6 +525,8 @@ export default function Home() {
   const [floatOpen, setFloatOpen] = useState(false);
   const [chartTabLocked, setChartTabLocked] = useState(false);
   const [marketSnapshot, setMarketSnapshot] = useState<MarketSnapshot>({});
+  const [mnqSetup, setMnqSetup] = useState<SetupStatus | null>(null);
+  const [mesSetup, setMesSetup] = useState<SetupStatus | null>(null);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const mediaRecRef = useRef<MediaRecorder | null>(null);
@@ -490,30 +534,69 @@ export default function Home() {
   const currentAudio = useRef<HTMLAudioElement | null>(null);
   const sendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
 
-  // Health check
   useEffect(() => {
     fetch(`${BACKEND}/health`)
       .then(r => r.ok ? setBackendStatus('ok') : setBackendStatus('offline'))
       .catch(() => setBackendStatus('offline'));
   }, []);
 
-  // Live market data polling
+  // Market data polling
   useEffect(() => {
     const fetchMarket = async () => {
       try {
         const res = await fetch(`${BACKEND}/market/live`);
-        if (res.ok) {
-          const data: MarketSnapshot = await res.json();
-          setMarketSnapshot(data);
-        }
-      } catch { /* backend offline — silently skip */ }
+        if (res.ok) setMarketSnapshot(await res.json());
+      } catch { }
     };
-    fetchMarket(); // immediate fetch on mount
+    fetchMarket();
     const interval = setInterval(fetchMarket, MARKET_POLL_MS);
     return () => clearInterval(interval);
   }, []);
 
-  // Sync chartTabLocked with lockedStream
+  // Setup status polling
+  useEffect(() => {
+    const fetchSetup = async () => {
+      try {
+        const [mnqRes, mesRes] = await Promise.all([
+          fetch(`${BACKEND}/setup/status?symbol=MNQ`),
+          fetch(`${BACKEND}/setup/status?symbol=MES`),
+        ]);
+        if (mnqRes.ok) setMnqSetup(await mnqRes.json());
+        if (mesRes.ok) setMesSetup(await mesRes.json());
+      } catch { }
+    };
+    fetchSetup();
+    const interval = setInterval(fetchSetup, MARKET_POLL_MS);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Alert polling — spoken alerts when setup score == 3
+  const playTTSRef = useRef<(text: string) => Promise<void>>(async () => {});
+  useEffect(() => {
+    const pollAlerts = async () => {
+      try {
+        const res = await fetch(`${BACKEND}/setup/alerts`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const alerts: Array<{ alert_text: string; symbol: string; bias: string; score: number }> = data.alerts || [];
+        for (const alert of alerts) {
+          // Add to chat
+          setMessages(prev => [...prev, {
+            id: Date.now().toString() + Math.random(),
+            role: 'assistant',
+            content: alert.alert_text,
+            timestamp: new Date(),
+            model: 'claude-sonnet-4-6',
+          }]);
+          // Speak it
+          await playTTSRef.current(alert.alert_text);
+        }
+      } catch { }
+    };
+    const interval = setInterval(pollAlerts, ALERT_POLL_MS);
+    return () => clearInterval(interval);
+  }, []);
+
   useEffect(() => {
     const interval = setInterval(() => {
       if (chartTabLocked && !lockedStream) setChartTabLocked(false);
@@ -523,18 +606,17 @@ export default function Home() {
 
   const handleLockChartTab = useCallback(async () => {
     if (chartTabLocked) {
-      releaseLocked();
-      setChartTabLocked(false);
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Chart tab unlinked. I will prompt you to pick a tab on the next screen request.', timestamp: new Date() }]);
+      releaseLocked(); setChartTabLocked(false);
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Chart tab unlinked.', timestamp: new Date() }]);
       return;
     }
-    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Opening tab picker — please select your TradingView tab in the browser prompt.', timestamp: new Date() }]);
+    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Opening tab picker — please select your TradingView tab.', timestamp: new Date() }]);
     const ok = await lockChartTab();
     if (ok) {
       setChartTabLocked(true);
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Chart tab locked ✓ I will capture that tab every time you say "Alpha, analyze my chart" — no more prompts needed.', timestamp: new Date() }]);
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Chart tab locked. I will capture it automatically on screen requests.', timestamp: new Date() }]);
     } else {
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Tab selection cancelled. Try again when ready.', timestamp: new Date() }]);
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Tab selection cancelled.', timestamp: new Date() }]);
     }
   }, [chartTabLocked]);
 
@@ -552,8 +634,10 @@ export default function Home() {
       audio.onended = () => { setSpeaking(false); URL.revokeObjectURL(url); };
       audio.onerror = () => { setSpeaking(false); };
       await audio.play();
-    } catch (e) { console.error('TTS error:', e); setSpeaking(false); }
+    } catch { setSpeaking(false); }
   }, [voiceEnabled]);
+
+  useEffect(() => { playTTSRef.current = playTTS; }, [playTTS]);
 
   const sendMessage = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim();
@@ -565,7 +649,7 @@ export default function Home() {
       imageBase64 = await captureScreen();
       setCapturing(false);
       if (!imageBase64) {
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Screen capture cancelled or failed. Try clicking "CHART TAB" first to lock onto your TradingView tab.', timestamp: new Date() }]);
+        setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Screen capture cancelled. Try clicking CHART TAB first.', timestamp: new Date() }]);
         return;
       }
     }
@@ -586,7 +670,7 @@ export default function Home() {
       setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', content: reply, toolCalls: data.tool_calls || [], pendingConfirmation: data.pending_confirmation || null, timestamp: new Date(), model }]);
       await playTTS(reply);
     } catch {
-      setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', content: 'CONNECTION LOST. Ensure backend is running: python -m uvicorn main:app --reload --port 8000', timestamp: new Date() }]);
+      setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', content: 'CONNECTION LOST. Ensure backend is running on port 8000.', timestamp: new Date() }]);
     } finally {
       setLoading(false);
       inputRef.current?.focus();
@@ -624,7 +708,7 @@ export default function Home() {
         } catch (e) { console.error('STT error:', e); }
       };
       setListening(true); rec.start();
-    } catch (e) { console.error('Mic error:', e); alert('Microphone access denied.'); }
+    } catch { alert('Microphone access denied.'); }
   }, [listening]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -632,20 +716,11 @@ export default function Home() {
   };
 
   const statusLabel =
-    capturing ? 'CAPTURING...' :
-    commandListening ? 'COMMAND...' :
-    listening ? 'LISTENING...' :
-    speaking ? 'SPEAKING...' :
-    loading ? 'PROCESSING...' :
-    wakeListening ? 'WAKE ACTIVE' : 'STANDBY';
-
+    capturing ? 'CAPTURING...' : commandListening ? 'COMMAND...' : listening ? 'LISTENING...' :
+    speaking ? 'SPEAKING...' : loading ? 'PROCESSING...' : wakeListening ? 'WAKE ACTIVE' : 'STANDBY';
   const statusColor =
-    capturing ? '#ffd700' :
-    commandListening ? '#50dc78' :
-    listening ? '#50dc78' :
-    speaking ? 'var(--accent)' :
-    loading ? 'var(--primary)' :
-    wakeListening ? 'rgba(80,160,255,0.9)' : 'var(--primary)';
+    capturing ? '#ffd700' : commandListening ? '#50dc78' : listening ? '#50dc78' :
+    speaking ? 'var(--accent)' : loading ? 'var(--primary)' : wakeListening ? 'rgba(80,160,255,0.9)' : 'var(--primary)';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', backgroundImage: 'radial-gradient(ellipse at 50% 0%, rgba(0,210,200,0.05) 0%, transparent 60%)', overflow: 'hidden' }}>
@@ -667,15 +742,10 @@ export default function Home() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <ModelBadge model={activeModel} hasImage={lastHadImage} />
 
-          {/* CHART TAB lock button */}
-          <button
-            onClick={handleLockChartTab}
-            title={chartTabLocked ? 'Chart tab locked — click to release' : 'Lock onto your TradingView tab for instant screen capture'}
+          <button onClick={handleLockChartTab} title={chartTabLocked ? 'Chart tab locked — click to release' : 'Lock onto your TradingView tab'}
             style={{ background: chartTabLocked ? 'rgba(255,200,0,0.12)' : 'rgba(0,210,200,0.05)', border: `1px solid ${chartTabLocked ? 'rgba(255,200,0,0.5)' : 'rgba(0,210,200,0.2)'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: chartTabLocked ? '#ffd700' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              {chartTabLocked
-                ? <><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></>
-                : <><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 9.9-1" /></>}
+              {chartTabLocked ? <><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></> : <><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 9.9-1" /></>}
             </svg>
             {chartTabLocked ? 'CHART LOCKED' : 'CHART TAB'}
           </button>
@@ -700,7 +770,6 @@ export default function Home() {
             {voiceEnabled ? 'VOICE ON' : 'VOICE OFF'}
           </button>
 
-          {/* Live tickers */}
           <LiveTicker snapshot={marketSnapshot} />
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: backendStatus === 'ok' ? 'var(--green)' : backendStatus === 'offline' ? 'var(--red)' : 'var(--text-muted)', background: 'var(--surface-2)', padding: '4px 10px', borderRadius: 4, border: `1px solid ${backendStatus === 'ok' ? 'rgba(0,229,160,0.2)' : backendStatus === 'offline' ? 'rgba(255,68,102,0.2)' : 'var(--border)'}` }}>
@@ -711,7 +780,7 @@ export default function Home() {
       </header>
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        <div style={{ width: 260, flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, borderRight: '1px solid var(--border)', background: 'rgba(4,15,18,0.7)', position: 'relative', padding: '24px 0' }}>
+        <div style={{ width: 260, flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', gap: 16, borderRight: '1px solid var(--border)', background: 'rgba(4,15,18,0.7)', position: 'relative', padding: '24px 0', overflowY: 'auto' }}>
           <div style={{ position: 'relative' }}>
             <div style={{ position: 'relative', padding: 12 }}>
               <HudCorner pos="tl" /><HudCorner pos="tr" /><HudCorner pos="bl" /><HudCorner pos="br" />
@@ -720,20 +789,15 @@ export default function Home() {
           </div>
 
           <div style={{ textAlign: 'center', fontFamily: 'Share Tech Mono, monospace', fontSize: 10, letterSpacing: '0.15em' }}>
-            <div style={{ color: statusColor, marginBottom: 4, transition: 'color 200ms ease' }}>{statusLabel}</div>
+            <div style={{ color: statusColor, marginBottom: 4 }}>{statusLabel}</div>
             <div style={{ color: 'var(--text-faint)' }}>MNQ - MES FUTURES</div>
           </div>
 
-          {chartTabLocked && (
-            <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: '#ffd700', textAlign: 'center', border: '1px solid rgba(255,200,0,0.2)', borderRadius: 4, padding: '4px 10px' }}>📷 CHART TAB LOCKED</div>
-          )}
+          {/* PB Blake Setup Panel */}
+          <SetupPanel mnq={mnqSetup} mes={mesSetup} />
 
-          {wakeListening && !commandListening && !isBusy && (
-            <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: 'rgba(80,160,255,0.6)', textAlign: 'center', border: '1px solid rgba(80,160,255,0.15)', borderRadius: 4, padding: '4px 10px' }}>SAY &quot;ALPHA ...&quot; TO ACTIVATE</div>
-          )}
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', padding: '0 16px', marginTop: 8 }}>
-            {['Alpha, MNQ market outlook', 'Alpha, key support levels', 'Alpha, analyze my chart', 'Alpha, pre-market analysis'].map(prompt => (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', padding: '0 16px', marginTop: 4 }}>
+            {['Alpha, what is the current setup', 'Alpha, MNQ bias check', 'Alpha, analyze my chart', 'Alpha, pre-market analysis'].map(prompt => (
               <button key={prompt} onClick={() => { setInput(prompt); setTimeout(() => inputRef.current?.focus(), 50); }}
                 style={{ background: 'rgba(0,210,200,0.04)', border: '1px solid var(--border)', borderRadius: 4, padding: '6px 10px', color: 'var(--text-muted)', fontSize: 10, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.05em', cursor: 'pointer', textAlign: 'left', transition: 'all 150ms ease' }}
                 onMouseEnter={e => { (e.target as HTMLElement).style.borderColor = 'var(--primary)'; (e.target as HTMLElement).style.color = 'var(--primary)'; }}
@@ -749,7 +813,7 @@ export default function Home() {
             <div style={{ display: 'flex', gap: 10, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px' }}>
               <span style={{ color: capturing ? '#ffd700' : 'var(--primary)', fontFamily: 'Share Tech Mono, monospace', fontSize: 13, alignSelf: 'flex-end', paddingBottom: 1 }}>{'>'}</span>
               <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
-                placeholder='Ask Alpha anything... or say "Alpha, analyze my chart"' rows={1}
+                placeholder='Ask Alpha... or say "Alpha, what is the current setup"' rows={1}
                 style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--text)', font: 'inherit', fontSize: 14, resize: 'none', minHeight: 24, maxHeight: 120, overflowY: 'auto', lineHeight: 1.5 }} />
               <MicButton listening={listening} onClick={toggleMic} disabled={loading || speaking || capturing} />
               <button onClick={() => sendMessage()} disabled={loading || !input.trim() || capturing}
