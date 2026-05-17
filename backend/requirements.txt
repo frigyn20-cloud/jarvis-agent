@@ -1,18 +1,13 @@
 fastapi
-uvicorn[standard]
+uvicorn
 python-dotenv
-httpx
-python-multipart
-# Primary LLM
+anthropologic
 langchain-anthropic
-# Fallback LLM
 langchain-groq
-groq
-# Core
 langchain-core
-langchain-community
-langgraph
 numexpr
-# Search
-ddgs
 tavily-python
+ddgs
+elevenlabs
+httpx
+yfinance

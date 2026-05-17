@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from agent import run_agent
 from trading_state import get_session, reset_session, TradingSessionState
 from voice import text_to_speech, speech_to_text
+from market_data import get_market_snapshot
 
 load_dotenv()
 
@@ -26,7 +27,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []
-    image_base64: Optional[str] = None  # base64-encoded PNG/JPEG from screen capture
+    image_base64: Optional[str] = None
 
 
 class TTSRequest(BaseModel):
@@ -44,23 +45,33 @@ async def chat(req: ChatRequest):
     return result
 
 
-# ─── Voice endpoints ───────────────────────────────────────────────────────────────
+# ─── Market data endpoint ──────────────────────────────────────────────────────
+
+@app.get("/market/live")
+async def market_live():
+    """
+    Returns live quotes for MNQ, MES, VIX.
+    Frontend polls this every 30 seconds to update the header tickers.
+    """
+    snapshot = await get_market_snapshot()
+    return snapshot
+
+
+# ─── Voice endpoints ───────────────────────────────────────────────────────────
 
 @app.post("/voice/tts")
 async def tts(req: TTSRequest):
-    """Convert text to speech. Returns MP3 audio."""
     audio_bytes = await text_to_speech(req.text)
     return Response(content=audio_bytes, media_type="audio/mpeg")
 
 
 @app.post("/voice/stt")
 async def stt(audio: UploadFile = File(...)):
-    """Transcribe audio to text using Groq Whisper."""
     text = await speech_to_text(audio)
     return {"text": text}
 
 
-# ─── Session State endpoints ────────────────────────────────────────────────────────
+# ─── Session State endpoints ───────────────────────────────────────────────────
 
 @app.get("/session", response_model=TradingSessionState)
 def get_session_state():
