@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 python-dotenv
-anthropologic
+anthropic
 langchain-anthropic
 langchain-groq
 langchain-core
