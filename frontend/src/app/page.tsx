@@ -327,6 +327,7 @@ function SetupPanel({ mnq, mes }: { mnq: SetupStatus | null; mes: SetupStatus | 
 function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: boolean) {
   const recRef = useRef<SpeechRecognition | null>(null);
   const cmdBuf = useRef('');
+  const interimBuf = useRef(''); // tracks latest interim transcript after wake
   const awaitingCmd = useRef(false);
   const wakeLatched = useRef(false);
   const silenceT = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -362,12 +363,20 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
   }, []);
 
   const reset = useCallback(() => {
-    clearT(); cmdBuf.current = ''; awaitingCmd.current = false; wakeLatched.current = false;
+    clearT();
+    cmdBuf.current = '';
+    interimBuf.current = '';
+    awaitingCmd.current = false;
+    wakeLatched.current = false;
     setCommandListening(false);
   }, [clearT]);
 
   const dispatch = useCallback((cmd: string) => {
-    clearT(); cmdBuf.current = ''; awaitingCmd.current = false; wakeLatched.current = false;
+    clearT();
+    cmdBuf.current = '';
+    interimBuf.current = '';
+    awaitingCmd.current = false;
+    wakeLatched.current = false;
     setCommandListening(false);
     if (cmd.trim()) onCommandRef.current(cmd.trim());
   }, [clearT]);
@@ -402,30 +411,60 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
 
       r.onresult = (event: SpeechRecognitionEvent) => {
         if (busyRef.current) return;
+
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const result = event.results[i];
           const isFinal = result.isFinal;
+
+          // Collect all alternatives into one combined string for wake detection
           let combined = '';
           for (let a = 0; a < result.length; a++) combined += ' ' + result[a].transcript;
+
           if (!awaitingCmd.current) {
+            // ── WAKE DETECTION: accept on both interim and final results ──
             if (hasWake(combined) && !wakeLatched.current) {
-              wakeLatched.current = true; awaitingCmd.current = true; setCommandListening(true);
+              wakeLatched.current = true;
+              awaitingCmd.current = true;
+              setCommandListening(true);
               const tail = afterWakeText(combined);
               if (tail) {
-                cmdBuf.current = tail; clearT();
-                silenceT.current = setTimeout(() => dispatch(cmdBuf.current), COMMAND_SILENCE_MS);
+                // Something was already spoken after the wake word in this same result
+                if (isFinal) {
+                  cmdBuf.current = tail;
+                } else {
+                  interimBuf.current = tail;
+                }
+                clearT();
+                silenceT.current = setTimeout(
+                  () => dispatch(cmdBuf.current || interimBuf.current),
+                  COMMAND_SILENCE_MS,
+                );
               } else {
+                // Wake word only — wait for follow-up speech
                 clearT();
                 wakeOnlyT.current = setTimeout(reset, WAKE_ONLY_TIMEOUT_MS);
               }
             }
-          } else if (isFinal) {
+          } else {
+            // ── COMMAND ACCUMULATION: accept BOTH interim and final ──
             const raw = result[0].transcript;
             const text = hasWake(raw) ? afterWakeText(raw) : raw.trim();
             if (text) {
-              cmdBuf.current += (cmdBuf.current ? ' ' : '') + text;
+              if (isFinal) {
+                // Final result: commit to cmdBuf and clear interim
+                cmdBuf.current += (cmdBuf.current ? ' ' : '') + text;
+                interimBuf.current = '';
+              } else {
+                // Interim result: store as interimBuf (not appended to cmdBuf yet)
+                // This ensures silence timer can fire with whatever was heard so far
+                interimBuf.current = text;
+              }
               clearT();
-              silenceT.current = setTimeout(() => dispatch(cmdBuf.current), COMMAND_SILENCE_MS);
+              // Dispatch with best available text: committed finals + latest interim
+              silenceT.current = setTimeout(
+                () => dispatch(cmdBuf.current || interimBuf.current),
+                COMMAND_SILENCE_MS,
+              );
             }
           }
         }
@@ -438,6 +477,8 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
 
       r.onend = () => {
         if (deadRef.current || !enabledRef.current) { setWakeListening(false); return; }
+        // If we were awaiting a command and had interim text but no final,
+        // the silence timer will dispatch it. Just restart recognition.
         setTimeout(startRec, 150);
       };
 
@@ -449,8 +490,13 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
     return () => {
       deadRef.current = true;
       try { recRef.current?.stop(); } catch (_) {}
-      recRef.current = null; clearT(); setCommandListening(false);
-      cmdBuf.current = ''; awaitingCmd.current = false; wakeLatched.current = false;
+      recRef.current = null;
+      clearT();
+      setCommandListening(false);
+      cmdBuf.current = '';
+      interimBuf.current = '';
+      awaitingCmd.current = false;
+      wakeLatched.current = false;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, gestureReady]);
@@ -497,7 +543,7 @@ function FloatingListener({
         <span style={{ fontSize: 8, letterSpacing: '0.12em', color: statusColor, fontFamily: 'monospace' }}>{statusLabel}</span>
       </div>
       {!isBusy && wakeListening && !commandListening && (
-        <div style={{ fontSize: 7, color: 'rgba(80,160,255,0.6)', fontFamily: 'monospace', letterSpacing: '0.08em', textAlign: 'center', padding: '0 8px' }}>say “Alpha…” to activate</div>
+        <div style={{ fontSize: 7, color: 'rgba(80,160,255,0.6)', fontFamily: 'monospace', letterSpacing: '0.08em', textAlign: 'center', padding: '0 8px' }}>say "Alpha…" to activate</div>
       )}
     </div>
   );
