@@ -5,6 +5,7 @@ anthropic
 langchain-anthropic
 langchain-groq
 langchain-core
+langgraph
 numexpr
 tavily-python
 ddgs
@@ -12,3 +13,4 @@ elevenlabs
 httpx
 yfinance
 pytz
+python-multipart
