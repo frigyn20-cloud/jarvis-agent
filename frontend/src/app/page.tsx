@@ -48,36 +48,6 @@ function afterWakeText(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// AudioContext keepalive — holds a silent mic stream open so Chrome never
-// considers the mic idle and throttles SpeechRecognition restarts.
-// ---------------------------------------------------------------------------
-let keepaliveCtx: AudioContext | null = null;
-let keepaliveStream: MediaStream | null = null;
-
-async function startMicKeepalive() {
-  if (keepaliveCtx) return;
-  try {
-    keepaliveStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    keepaliveCtx = new AudioContext();
-    const src = keepaliveCtx.createMediaStreamSource(keepaliveStream);
-    const gain = keepaliveCtx.createGain();
-    gain.gain.value = 0;
-    src.connect(gain);
-    gain.connect(keepaliveCtx.destination);
-    if (keepaliveCtx.state === 'suspended') await keepaliveCtx.resume();
-  } catch (e) {
-    console.warn('Mic keepalive failed:', e);
-  }
-}
-
-function stopMicKeepalive() {
-  keepaliveCtx?.close();
-  keepaliveCtx = null;
-  keepaliveStream?.getTracks().forEach(t => t.stop());
-  keepaliveStream = null;
-}
-
-// ---------------------------------------------------------------------------
 // Screenshot helpers
 // ---------------------------------------------------------------------------
 let html2canvasLoaded = false;
@@ -226,6 +196,9 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
 
 // ---------------------------------------------------------------------------
 // useWakeWord
+// SpeechRecognition only — no getUserMedia, no AudioContext, no keepalive.
+// Chrome always fires onend after silence; we restart silently so the
+// wake indicator stays on continuously from the user's perspective.
 // ---------------------------------------------------------------------------
 function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: boolean) {
   const recRef = useRef<SpeechRecognition | null>(null);
@@ -238,9 +211,6 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
   const busyRef = useRef(busy);
   const onCommandRef = useRef(onCommand);
   const deadRef = useRef(false);
-  // wakeListening stays TRUE the entire time wake is enabled.
-  // We only flip it false when explicitly disabled or unmounted.
-  // This prevents the orb from flickering during the automatic restart cycle.
   const [wakeListening, setWakeListening] = useState(false);
   const [commandListening, setCommandListening] = useState(false);
 
@@ -285,16 +255,13 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
       deadRef.current = true;
       try { recRef.current?.stop(); } catch (_) {}
       recRef.current = null;
-      // Only now do we hide the wake indicator
       setWakeListening(false);
       setCommandListening(false);
-      stopMicKeepalive();
       return;
     }
 
     deadRef.current = false;
-    startMicKeepalive();
-    // Show wake indicator immediately — it stays on until disabled
+    // Show the wake indicator immediately — stays on until disabled
     setWakeListening(true);
 
     function startRec() {
@@ -306,10 +273,6 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
       r.lang = 'en-US';
       r.maxAlternatives = 3;
       recRef.current = r;
-
-      r.onstart = () => {
-        if (keepaliveCtx?.state === 'suspended') keepaliveCtx.resume().catch(() => {});
-      };
 
       r.onresult = (event: SpeechRecognitionEvent) => {
         if (busyRef.current) return;
@@ -351,14 +314,15 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
         console.warn('Wake word error:', e.error);
       };
 
+      // Chrome always fires onend after silence even with continuous=true.
+      // Do NOT set wakeListening=false here — that causes the flicker.
+      // Just restart silently so the indicator stays blue.
       r.onend = () => {
-        // Do NOT call setWakeListening(false) here — that causes the flicker.
-        // Chrome always fires onend after silence; we just silently restart.
         if (deadRef.current || !enabledRef.current) {
           setWakeListening(false);
           return;
         }
-        setTimeout(startRec, 100);
+        setTimeout(startRec, 150);
       };
 
       try { r.start(); } catch (_) {}
@@ -371,7 +335,6 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
       try { recRef.current?.stop(); } catch (_) {}
       recRef.current = null;
       clearT();
-      // wakeListening will be set false by the onend handler since deadRef is now true
       setCommandListening(false);
       cmdBuf.current = '';
       awaitingCmd.current = false;
@@ -485,21 +448,6 @@ export default function Home() {
     fetch(`${BACKEND}/health`)
       .then(r => r.ok ? setBackendStatus('ok') : setBackendStatus('offline'))
       .catch(() => setBackendStatus('offline'));
-  }, []);
-
-  useEffect(() => {
-    const onGesture = () => {
-      startMicKeepalive();
-      document.removeEventListener('click', onGesture);
-      document.removeEventListener('keydown', onGesture);
-    };
-    document.addEventListener('click', onGesture);
-    document.addEventListener('keydown', onGesture);
-    return () => {
-      document.removeEventListener('click', onGesture);
-      document.removeEventListener('keydown', onGesture);
-      stopMicKeepalive();
-    };
   }, []);
 
   const playTTS = useCallback(async (text: string) => {
