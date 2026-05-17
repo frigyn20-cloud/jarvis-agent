@@ -11,3 +11,4 @@ ddgs
 elevenlabs
 httpx
 yfinance
+pytz
