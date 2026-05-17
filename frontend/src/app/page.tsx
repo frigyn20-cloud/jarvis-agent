@@ -9,7 +9,6 @@ const WAKE_WORD = 'alpha';
 const WAKE_ALTS = ['alfa', 'elfa', 'alva', 'alvah', 'alphas'];
 const COMMAND_SILENCE_MS = 2500;
 const WAKE_ONLY_TIMEOUT_MS = 5000;
-const CHANNEL_NAME = 'alpha-wake-channel';
 
 const SCREEN_TRIGGERS = [
   'look at my screen', 'what do you see', 'analyze my chart',
@@ -32,9 +31,6 @@ export interface Message {
   hasImage?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Wake-word helpers (shared with listener/page.tsx logic)
-// ---------------------------------------------------------------------------
 function normT(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim();
 }
@@ -52,7 +48,7 @@ function afterWakeText(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Silent tab screenshot
+// Screenshot helpers
 // ---------------------------------------------------------------------------
 let html2canvasLoaded = false;
 async function loadHtml2Canvas(): Promise<typeof import('html2canvas').default> {
@@ -80,7 +76,7 @@ async function captureCurrentTab(): Promise<string | null> {
 async function captureViaDisplayMedia(): Promise<string | null> {
   try {
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: { width: 1920, height: 1080 } as MediaTrackConstraints, audio: false });
-    const video  = document.createElement('video');
+    const video = document.createElement('video');
     video.srcObject = stream;
     await new Promise<void>(r => { video.onloadedmetadata = () => r(); });
     await video.play();
@@ -93,124 +89,140 @@ async function captureViaDisplayMedia(): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
-// AlphaOrb
+// AlphaOrb canvas
 // ---------------------------------------------------------------------------
-function AlphaOrb({ speaking, listening, wakeListening }: { speaking: boolean; listening: boolean; wakeListening: boolean }) {
+function AlphaOrb({ speaking, listening, wakeListening, size = 220 }: { speaking: boolean; listening: boolean; wakeListening: boolean; size?: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animRef   = useRef<number>(0);
+  const animRef = useRef<number>(0);
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return;
     const ctx = canvas.getContext('2d')!;
-    const W = canvas.width = 220, H = canvas.height = 220, cx = W/2, cy = H/2;
-    const particles = Array.from({ length: 120 }, (_, i) => ({
-      angle: (i/120)*Math.PI*2, radius: 72+Math.random()*22,
-      speed: 0.003+Math.random()*0.006, size: 0.8+Math.random()*1.4, opacity: 0.3+Math.random()*0.7,
+    const W = canvas.width = size, H = canvas.height = size, cx = W / 2, cy = H / 2;
+    const N = size < 160 ? 60 : 120;
+    const particles = Array.from({ length: N }, (_, i) => ({
+      angle: (i / N) * Math.PI * 2, radius: (cx * 0.66) + Math.random() * (cx * 0.2),
+      speed: 0.003 + Math.random() * 0.006, size: 0.8 + Math.random() * 1.4, opacity: 0.3 + Math.random() * 0.7,
     }));
     function draw(t: number) {
-      ctx.clearRect(0,0,W,H);
-      const spk=speaking, lst=listening, wk=wakeListening&&!lst&&!spk;
-      const intensity=spk?1.5:lst?1.2:wk?0.7:1.0, wobble=spk?0.08:lst?0.05:wk?0.015:0.025;
-      const glowColor=lst?'80,220,120':wk?'80,160,255':'0,210,200';
-      const og=ctx.createRadialGradient(cx,cy,55,cx,cy,105);
-      og.addColorStop(0,`rgba(${glowColor},${0.18*intensity})`); og.addColorStop(1,`rgba(${glowColor},0)`);
-      ctx.beginPath(); ctx.arc(cx,cy,105,0,Math.PI*2); ctx.fillStyle=og; ctx.fill();
-      [0,1,2].forEach(ri=>{
-        const rOff=ri*14, rSpd=(ri%2===0?1:-1)*0.0004*t;
-        particles.forEach((p,i)=>{
-          const wave=Math.sin(t*0.001*(1+ri*0.3)+i*0.18)*wobble;
-          const r=(p.radius+rOff)*(1+wave), a=p.angle+rSpd+p.speed*t*0.001;
-          const x=cx+Math.cos(a)*r, y=cy+Math.sin(a)*r*0.38;
-          const op=p.opacity*((spk||lst)?Math.min(1,0.6+Math.abs(Math.sin(t*0.003+i))):1);
-          const g=lst?200+ri*10:wk?140+ri*15:180+ri*20, b_=lst?120+ri*10:wk?220+ri*10:180+ri*10;
-          ctx.beginPath(); ctx.arc(x,y,p.size,0,Math.PI*2);
-          ctx.fillStyle=`rgba(0,${g},${b_},${op})`; ctx.fill();
+      ctx.clearRect(0, 0, W, H);
+      const spk = speaking, lst = listening, wk = wakeListening && !lst && !spk;
+      const intensity = spk ? 1.5 : lst ? 1.2 : wk ? 0.7 : 1.0;
+      const wobble = spk ? 0.08 : lst ? 0.05 : wk ? 0.015 : 0.025;
+      const glowColor = lst ? '80,220,120' : wk ? '80,160,255' : '0,210,200';
+      const gr = cx * 0.95;
+      const og = ctx.createRadialGradient(cx, cy, cx * 0.5, cx, cy, gr);
+      og.addColorStop(0, `rgba(${glowColor},${0.18 * intensity})`); og.addColorStop(1, `rgba(${glowColor},0)`);
+      ctx.beginPath(); ctx.arc(cx, cy, gr, 0, Math.PI * 2); ctx.fillStyle = og; ctx.fill();
+      [0, 1, 2].forEach(ri => {
+        const rOff = ri * (cx * 0.13), rSpd = (ri % 2 === 0 ? 1 : -1) * 0.0004 * t;
+        particles.forEach((p, i) => {
+          const wave = Math.sin(t * 0.001 * (1 + ri * 0.3) + i * 0.18) * wobble;
+          const r = (p.radius + rOff) * (1 + wave), a = p.angle + rSpd + p.speed * t * 0.001;
+          const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r * 0.38;
+          const op = p.opacity * ((spk || lst) ? Math.min(1, 0.6 + Math.abs(Math.sin(t * 0.003 + i))) : 1);
+          const g = lst ? 200 + ri * 10 : wk ? 140 + ri * 15 : 180 + ri * 20;
+          const b_ = lst ? 120 + ri * 10 : wk ? 220 + ri * 10 : 180 + ri * 10;
+          ctx.beginPath(); ctx.arc(x, y, p.size, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(0,${g},${b_},${op})`; ctx.fill();
         });
       });
-      const ig=ctx.createRadialGradient(cx-10,cy-10,2,cx,cy,46);
-      if(lst){ig.addColorStop(0,`rgba(80,255,120,${0.55*intensity})`);ig.addColorStop(0.5,`rgba(0,200,100,${0.35*intensity})`);ig.addColorStop(1,`rgba(0,80,40,${0.2*intensity})`);}
-      else if(wk){ig.addColorStop(0,`rgba(80,160,255,${0.35*intensity})`);ig.addColorStop(0.5,`rgba(0,100,200,${0.2*intensity})`);ig.addColorStop(1,`rgba(0,40,100,${0.1*intensity})`);}
-      else{ig.addColorStop(0,`rgba(0,255,240,${0.55*intensity})`);ig.addColorStop(0.5,`rgba(0,180,175,${0.35*intensity})`);ig.addColorStop(1,`rgba(0,80,90,${0.2*intensity})`);}
-      ctx.beginPath(); ctx.arc(cx,cy,46,0,Math.PI*2); ctx.fillStyle=ig; ctx.fill();
-      const cg=ctx.createRadialGradient(cx,cy,0,cx,cy,14);
-      cg.addColorStop(0,`rgba(255,255,255,${0.9*intensity})`); cg.addColorStop(1,lst?'rgba(80,255,120,0)':wk?'rgba(80,160,255,0)':'rgba(0,210,200,0)');
-      ctx.beginPath(); ctx.arc(cx,cy,14,0,Math.PI*2); ctx.fillStyle=cg; ctx.fill();
-      if(spk||lst){const sr=56+Math.sin(t*0.004)*(spk?10:6); ctx.beginPath(); ctx.arc(cx,cy,sr,0,Math.PI*2); ctx.strokeStyle=lst?`rgba(80,255,120,${0.3+Math.sin(t*0.005)*0.2})`:`rgba(0,255,220,${0.3+Math.sin(t*0.005)*0.2})`; ctx.lineWidth=1; ctx.stroke();}
-      if(wk){const sr=52+Math.sin(t*0.0015)*4; ctx.beginPath(); ctx.arc(cx,cy,sr,0,Math.PI*2); ctx.strokeStyle=`rgba(80,160,255,${0.15+Math.sin(t*0.002)*0.08})`; ctx.lineWidth=1; ctx.stroke();}
-      animRef.current=requestAnimationFrame(draw);
+      const ir = cx * 0.42;
+      const ig = ctx.createRadialGradient(cx - cx * 0.09, cy - cy * 0.09, 2, cx, cy, ir);
+      if (lst) { ig.addColorStop(0, `rgba(80,255,120,${0.55 * intensity})`); ig.addColorStop(1, `rgba(0,80,40,${0.2 * intensity})`); }
+      else if (wk) { ig.addColorStop(0, `rgba(80,160,255,${0.35 * intensity})`); ig.addColorStop(1, `rgba(0,40,100,${0.1 * intensity})`); }
+      else { ig.addColorStop(0, `rgba(0,255,240,${0.55 * intensity})`); ig.addColorStop(1, `rgba(0,80,90,${0.2 * intensity})`); }
+      ctx.beginPath(); ctx.arc(cx, cy, ir, 0, Math.PI * 2); ctx.fillStyle = ig; ctx.fill();
+      const cr = cx * 0.13;
+      const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
+      cg.addColorStop(0, `rgba(255,255,255,${0.9 * intensity})`); cg.addColorStop(1, 'rgba(0,210,200,0)');
+      ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI * 2); ctx.fillStyle = cg; ctx.fill();
+      if (spk || lst) {
+        const sr = cx * 0.51 + Math.sin(t * 0.004) * (spk ? cx * 0.09 : cx * 0.05);
+        ctx.beginPath(); ctx.arc(cx, cy, sr, 0, Math.PI * 2);
+        ctx.strokeStyle = lst ? `rgba(80,255,120,${0.3 + Math.sin(t * 0.005) * 0.2})` : `rgba(0,255,220,${0.3 + Math.sin(t * 0.005) * 0.2})`;
+        ctx.lineWidth = 1; ctx.stroke();
+      }
+      if (wk) {
+        const sr = cx * 0.47 + Math.sin(t * 0.0015) * cx * 0.036;
+        ctx.beginPath(); ctx.arc(cx, cy, sr, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(80,160,255,${0.15 + Math.sin(t * 0.002) * 0.08})`;
+        ctx.lineWidth = 1; ctx.stroke();
+      }
+      animRef.current = requestAnimationFrame(draw);
     }
-    animRef.current=requestAnimationFrame(draw);
-    return ()=>cancelAnimationFrame(animRef.current);
-  },[speaking,listening,wakeListening]);
-  return <canvas ref={canvasRef} width={220} height={220} style={{display:'block'}} />;
+    animRef.current = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(animRef.current);
+  }, [speaking, listening, wakeListening, size]);
+  return <canvas ref={canvasRef} width={size} height={size} style={{ display: 'block' }} />;
 }
 
-function HudCorner({ pos }: { pos: 'tl'|'tr'|'bl'|'br' }) {
-  const size=14;
+function HudCorner({ pos }: { pos: 'tl' | 'tr' | 'bl' | 'br' }) {
+  const size = 14;
   return <div style={{
-    position:'absolute', width:size, height:size,
-    top:pos.startsWith('t')?0:undefined, bottom:pos.startsWith('b')?0:undefined,
-    left:pos.endsWith('l')?0:undefined, right:pos.endsWith('r')?0:undefined,
-    borderTop:pos.startsWith('t')?'1.5px solid var(--primary)':undefined,
-    borderBottom:pos.startsWith('b')?'1.5px solid var(--primary)':undefined,
-    borderLeft:pos.endsWith('l')?'1.5px solid var(--primary)':undefined,
-    borderRight:pos.endsWith('r')?'1.5px solid var(--primary)':undefined,
+    position: 'absolute', width: size, height: size,
+    top: pos.startsWith('t') ? 0 : undefined, bottom: pos.startsWith('b') ? 0 : undefined,
+    left: pos.endsWith('l') ? 0 : undefined, right: pos.endsWith('r') ? 0 : undefined,
+    borderTop: pos.startsWith('t') ? '1.5px solid var(--primary)' : undefined,
+    borderBottom: pos.startsWith('b') ? '1.5px solid var(--primary)' : undefined,
+    borderLeft: pos.endsWith('l') ? '1.5px solid var(--primary)' : undefined,
+    borderRight: pos.endsWith('r') ? '1.5px solid var(--primary)' : undefined,
   }} />;
 }
 
 function ModelBadge({ model, hasImage }: { model: string; hasImage?: boolean }) {
   const isClaude = model.includes('claude');
   return (
-    <span style={{ display:'inline-flex', alignItems:'center', gap:4, fontSize:9, fontFamily:'Share Tech Mono, monospace', letterSpacing:'0.12em', padding:'2px 8px', borderRadius:3, border:`1px solid ${isClaude?'rgba(168,100,255,0.35)':'rgba(0,210,200,0.25)'}`, background:isClaude?'rgba(168,100,255,0.08)':'rgba(0,210,200,0.06)', color:isClaude?'#b87fff':'var(--primary)' }}>
-      <span style={{ width:4, height:4, borderRadius:'50%', background:isClaude?'#b87fff':'var(--primary)', display:'inline-block' }} />
-      {isClaude ? `CLAUDE SONNET${hasImage?' - VISION':''}` : 'GROQ FALLBACK'}
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.12em', padding: '2px 8px', borderRadius: 3, border: `1px solid ${isClaude ? 'rgba(168,100,255,0.35)' : 'rgba(0,210,200,0.25)'}`, background: isClaude ? 'rgba(168,100,255,0.08)' : 'rgba(0,210,200,0.06)', color: isClaude ? '#b87fff' : 'var(--primary)' }}>
+      <span style={{ width: 4, height: 4, borderRadius: '50%', background: isClaude ? '#b87fff' : 'var(--primary)', display: 'inline-block' }} />
+      {isClaude ? `CLAUDE SONNET${hasImage ? ' - VISION' : ''}` : 'GROQ FALLBACK'}
     </span>
   );
 }
 
-function MicButton({ listening, onClick, disabled }: { listening: boolean; onClick: ()=>void; disabled: boolean }) {
+function MicButton({ listening, onClick, disabled }: { listening: boolean; onClick: () => void; disabled: boolean }) {
   return (
-    <button onClick={onClick} disabled={disabled} title={listening?'Stop & send':'Speak to Alpha'}
-      style={{ background:listening?'rgba(80,220,120,0.15)':'rgba(0,210,200,0.08)', border:`1px solid ${listening?'rgba(80,220,120,0.5)':'var(--border)'}`, borderRadius:4, padding:'6px 10px', cursor:disabled?'not-allowed':'pointer', display:'flex', alignItems:'center', justifyContent:'center', transition:'all 150ms ease', alignSelf:'flex-end', opacity:disabled?0.4:1, position:'relative' }}>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={listening?'#50dc78':'var(--primary)'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <button onClick={onClick} disabled={disabled} title={listening ? 'Stop & send' : 'Speak to Alpha'}
+      style={{ background: listening ? 'rgba(80,220,120,0.15)' : 'rgba(0,210,200,0.08)', border: `1px solid ${listening ? 'rgba(80,220,120,0.5)' : 'var(--border)'}`, borderRadius: 4, padding: '6px 10px', cursor: disabled ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 150ms ease', alignSelf: 'flex-end', opacity: disabled ? 0.4 : 1, position: 'relative' }}>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={listening ? '#50dc78' : 'var(--primary)'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="9" y="2" width="6" height="11" rx="3" />
         <path d="M5 10a7 7 0 0 0 14 0" />
         <line x1="12" y1="19" x2="12" y2="22" />
         <line x1="9" y1="22" x2="15" y2="22" />
       </svg>
-      {listening && <span style={{ position:'absolute', top:3, right:3, width:5, height:5, borderRadius:'50%', background:'#50dc78', animation:'blink 0.8s ease-in-out infinite' }} />}
+      {listening && <span style={{ position: 'absolute', top: 3, right: 3, width: 5, height: 5, borderRadius: '50%', background: '#50dc78', animation: 'blink 0.8s ease-in-out infinite' }} />}
     </button>
   );
 }
 
 // ---------------------------------------------------------------------------
-// useWakeWord — in-tab wake word detector
+// useWakeWord
 // ---------------------------------------------------------------------------
 function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: boolean) {
-  const recRef         = useRef<SpeechRecognition | null>(null);
-  const cmdBuf         = useRef('');
-  const awaitingCmd    = useRef(false);
-  const wakeLatched    = useRef(false);
-  const silenceT       = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wakeOnlyT      = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const enabledRef     = useRef(enabled);
-  const busyRef        = useRef(busy);
-  const onCommandRef   = useRef(onCommand);
-  const [wakeListening,    setWakeListening]    = useState(false);
+  const recRef = useRef<SpeechRecognition | null>(null);
+  const cmdBuf = useRef('');
+  const awaitingCmd = useRef(false);
+  const wakeLatched = useRef(false);
+  const silenceT = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wakeOnlyT = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const enabledRef = useRef(enabled);
+  const busyRef = useRef(busy);
+  const onCommandRef = useRef(onCommand);
+  const restartPending = useRef(false);
+  const [wakeListening, setWakeListening] = useState(false);
   const [commandListening, setCommandListening] = useState(false);
 
-  // Keep refs current every render — no stale closures
-  enabledRef.current   = enabled;
-  busyRef.current      = busy;
+  enabledRef.current = enabled;
+  busyRef.current = busy;
   onCommandRef.current = onCommand;
 
   const clearT = useCallback(() => {
-    if (silenceT.current)  { clearTimeout(silenceT.current);  silenceT.current  = null; }
+    if (silenceT.current) { clearTimeout(silenceT.current); silenceT.current = null; }
     if (wakeOnlyT.current) { clearTimeout(wakeOnlyT.current); wakeOnlyT.current = null; }
   }, []);
 
   const reset = useCallback(() => {
     clearT();
-    cmdBuf.current      = '';
+    cmdBuf.current = '';
     awaitingCmd.current = false;
     wakeLatched.current = false;
     setCommandListening(false);
@@ -218,21 +230,19 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
 
   const dispatch = useCallback((cmd: string) => {
     clearT();
-    cmdBuf.current      = '';
+    cmdBuf.current = '';
     awaitingCmd.current = false;
     wakeLatched.current = false;
     setCommandListening(false);
     if (cmd.trim()) onCommandRef.current(cmd.trim());
   }, [clearT]);
 
-  // Reset state when busy goes false (Alpha finished responding)
   const prevBusy = useRef(busy);
   useEffect(() => {
     if (prevBusy.current && !busy) reset();
     prevBusy.current = busy;
   }, [busy, reset]);
 
-  // Start/stop recognition when enabled changes
   useEffect(() => {
     const SR =
       (window as unknown as { SpeechRecognition?: typeof globalThis.SpeechRecognition }).SpeechRecognition ||
@@ -246,29 +256,30 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
 
     let dead = false;
 
-    function createRec(): SpeechRecognition {
+    function buildRec(): SpeechRecognition {
       const r = new SR!();
-      r.continuous      = true;
-      r.interimResults  = true;
-      r.lang            = 'en-US';
+      r.continuous = true;
+      r.interimResults = true;
+      r.lang = 'en-US';
       r.maxAlternatives = 3;
 
-      r.onstart = () => setWakeListening(true);
+      r.onstart = () => {
+        restartPending.current = false;
+        setWakeListening(true);
+      };
 
       r.onresult = (event: SpeechRecognitionEvent) => {
         if (busyRef.current) return;
         for (let i = event.resultIndex; i < event.results.length; i++) {
-          const result  = event.results[i];
+          const result = event.results[i];
           const isFinal = result.isFinal;
-
-          // Combine all alternatives into one string for matching
           let combined = '';
           for (let a = 0; a < result.length; a++) combined += ' ' + result[a].transcript;
 
           if (!awaitingCmd.current) {
             if (hasWake(combined) && !wakeLatched.current) {
-              wakeLatched.current  = true;
-              awaitingCmd.current  = true;
+              wakeLatched.current = true;
+              awaitingCmd.current = true;
               setCommandListening(true);
               const tail = afterWakeText(combined);
               if (tail) {
@@ -281,7 +292,7 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
               }
             }
           } else if (isFinal) {
-            const raw  = result[0].transcript;
+            const raw = result[0].transcript;
             const text = hasWake(raw) ? afterWakeText(raw) : raw.trim();
             if (text) {
               cmdBuf.current += (cmdBuf.current ? ' ' : '') + text;
@@ -292,33 +303,44 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
         }
       };
 
-      r.onend = () => {
-        if (dead || !enabledRef.current) return;
-        setTimeout(() => {
-          if (dead || !enabledRef.current) return;
-          try { r.start(); } catch (_) { recRef.current = createRec(); try { recRef.current.start(); } catch (__) {} }
-        }, 300);
-      };
-
       r.onerror = (e: SpeechRecognitionErrorEvent) => {
         if (e.error === 'no-speech' || e.error === 'aborted') return;
         console.warn('Wake word error:', e.error);
       };
 
+      // Safe restart: one pending restart at a time, no recursion
+      r.onend = () => {
+        setWakeListening(false);
+        if (dead || !enabledRef.current || restartPending.current) return;
+        restartPending.current = true;
+        setTimeout(() => {
+          restartPending.current = false;
+          if (dead || !enabledRef.current) return;
+          try {
+            r.start();
+          } catch (_) {
+            // instance is dead — build a fresh one
+            recRef.current = buildRec();
+            try { recRef.current.start(); } catch (__) {}
+          }
+        }, 400);
+      };
+
       return r;
     }
 
-    recRef.current = createRec();
+    recRef.current = buildRec();
     try { recRef.current.start(); } catch (_) {}
 
     return () => {
       dead = true;
+      restartPending.current = false;
       try { recRef.current?.stop(); } catch (_) {}
       recRef.current = null;
       clearT();
       setWakeListening(false);
       setCommandListening(false);
-      cmdBuf.current      = '';
+      cmdBuf.current = '';
       awaitingCmd.current = false;
       wakeLatched.current = false;
     };
@@ -328,32 +350,110 @@ function useWakeWord(enabled: boolean, onCommand: (text: string) => void, busy: 
   return { wakeListening, commandListening };
 }
 
+// ---------------------------------------------------------------------------
+// Draggable floating listener widget (replaces broken popup window)
+// ---------------------------------------------------------------------------
+function FloatingListener({
+  speaking, listening, commandListening, wakeListening, isBusy, statusLabel, statusColor,
+  onClose,
+}: {
+  speaking: boolean; listening: boolean; commandListening: boolean; wakeListening: boolean;
+  isBusy: boolean; statusLabel: string; statusColor: string;
+  onClose: () => void;
+}) {
+  const [pos, setPos] = useState({ x: window.innerWidth - 200, y: 80 });
+  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button')) return;
+    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y };
+    e.preventDefault();
+  };
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragRef.current) return;
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      setPos({
+        x: Math.max(0, Math.min(window.innerWidth - 160, dragRef.current.origX + dx)),
+        y: Math.max(0, Math.min(window.innerHeight - 200, dragRef.current.origY + dy)),
+      });
+    };
+    const onUp = () => { dragRef.current = null; };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+  }, []);
+
+  const orbState = commandListening || listening ? 'command' : wakeListening ? 'wake' : 'idle';
+  const dotColor = orbState === 'command' ? '#50dc78' : orbState === 'wake' ? 'rgba(80,160,255,0.9)' : '#555';
+
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      style={{
+        position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000,
+        width: 160, background: 'rgba(7,21,24,0.97)',
+        border: '1px solid rgba(0,210,200,0.35)', borderRadius: 8,
+        boxShadow: '0 8px 32px rgba(0,0,0,0.6)', cursor: 'grab',
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        padding: '10px 0 12px', gap: 6, userSelect: 'none',
+        backdropFilter: 'blur(12px)',
+      }}
+    >
+      {/* drag handle bar */}
+      <div style={{ width: 32, height: 3, borderRadius: 2, background: 'rgba(0,210,200,0.3)', marginBottom: 2 }} />
+
+      {/* close button */}
+      <button
+        onClick={onClose}
+        style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0 }}
+        title="Close floating listener"
+      >✕</button>
+
+      <AlphaOrb speaking={speaking} listening={commandListening || listening} wakeListening={wakeListening && !commandListening && !listening} size={100} />
+
+      <div style={{ fontSize: 9, letterSpacing: '0.2em', color: '#00d2c8', fontFamily: 'monospace', fontWeight: 700, marginTop: -4 }}>ALPHA</div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+        <span style={{ width: 5, height: 5, borderRadius: '50%', background: dotColor, display: 'inline-block', boxShadow: `0 0 4px ${dotColor}` }} />
+        <span style={{ fontSize: 8, letterSpacing: '0.12em', color: statusColor, fontFamily: 'monospace' }}>{statusLabel}</span>
+      </div>
+
+      {!isBusy && wakeListening && !commandListening && (
+        <div style={{ fontSize: 7, color: 'rgba(80,160,255,0.6)', fontFamily: 'monospace', letterSpacing: '0.08em', textAlign: 'center', padding: '0 8px' }}>say &ldquo;Alpha…&rdquo;</div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([{
     id: '0', role: 'assistant',
-    content: 'ALPHA ONLINE. Wake word active - say "Alpha" followed by your command. For hands-free use across tabs, click POP OUT.',
+    content: 'ALPHA ONLINE. Wake word active — say "Alpha" followed by your command. Click "FLOAT" to pin a mini-orb anywhere on screen.',
     timestamp: new Date(), model: 'claude-sonnet-4-6',
   }]);
-  const [input,          setInput]          = useState('');
-  const [loading,        setLoading]        = useState(false);
-  const [speaking,       setSpeaking]       = useState(false);
-  const [listening,      setListening]      = useState(false);
-  const [capturing,      setCapturing]      = useState(false);
-  const [voiceEnabled,   setVoiceEnabled]   = useState(true);
-  const [wakeEnabled,    setWakeEnabled]    = useState(true);
-  const [activeModel,    setActiveModel]    = useState('claude-sonnet-4-6');
-  const [lastHadImage,   setLastHadImage]   = useState(false);
-  const [backendStatus,  setBackendStatus]  = useState<'checking'|'ok'|'offline'>('checking');
-  const [popupOpen,      setPopupOpen]      = useState(false);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [wakeEnabled, setWakeEnabled] = useState(true);
+  const [activeModel, setActiveModel] = useState('claude-sonnet-4-6');
+  const [lastHadImage, setLastHadImage] = useState(false);
+  const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
+  const [floatOpen, setFloatOpen] = useState(false);
 
-  const inputRef       = useRef<HTMLTextAreaElement>(null);
-  const mediaRecRef    = useRef<MediaRecorder | null>(null);
-  const audioChunks    = useRef<Blob[]>([]);
-  const currentAudio   = useRef<HTMLAudioElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const mediaRecRef = useRef<MediaRecorder | null>(null);
+  const audioChunks = useRef<Blob[]>([]);
+  const currentAudio = useRef<HTMLAudioElement | null>(null);
   const sendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
-  const popupRef       = useRef<Window | null>(null);
-  const channelRef     = useRef<BroadcastChannel | null>(null);
-  const isBusyRef      = useRef(false);
 
   useEffect(() => {
     fetch(`${BACKEND}/health`)
@@ -361,30 +461,12 @@ export default function Home() {
       .catch(() => setBackendStatus('offline'));
   }, []);
 
-  // BroadcastChannel — receive commands from popup listener
-  useEffect(() => {
-    const ch = new BroadcastChannel(CHANNEL_NAME);
-    channelRef.current = ch;
-    ch.onmessage = (e) => {
-      if (e.data?.type === 'command' && e.data.text) {
-        sendMessageRef.current(e.data.text);
-      }
-    };
-    return () => { ch.close(); channelRef.current = null; };
-  }, []);
-
-  const broadcastBusy = useCallback((val: boolean) => {
-    if (isBusyRef.current === val) return;
-    isBusyRef.current = val;
-    channelRef.current?.postMessage({ type: 'busy', value: val });
-  }, []);
-
   const playTTS = useCallback(async (text: string) => {
     if (!voiceEnabled || !text.trim()) return;
     try {
       if (currentAudio.current) { currentAudio.current.pause(); currentAudio.current = null; }
       setSpeaking(true);
-      const res = await fetch(`${BACKEND}/voice/tts`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
+      const res = await fetch(`${BACKEND}/voice/tts`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
       if (!res.ok) throw new Error('TTS failed');
       const url = URL.createObjectURL(await res.blob());
       const audio = new Audio(url);
@@ -418,17 +500,17 @@ export default function Home() {
     const history = messages.map(m => ({ role: m.role, content: m.content }));
 
     try {
-      const res  = await fetch(`${BACKEND}/chat`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ message: text, history, image_base64: imageBase64 }) });
+      const res = await fetch(`${BACKEND}/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text, history, image_base64: imageBase64 }) });
       if (!res.ok) throw new Error('Backend error');
-      const data  = await res.json();
+      const data = await res.json();
       const model = data.model || 'claude-sonnet-4-6';
       setActiveModel(model);
       setLastHadImage(!!imageBase64);
       const reply = data.reply || 'No response.';
-      setMessages(prev => [...prev, { id: (Date.now()+1).toString(), role: 'assistant', content: reply, toolCalls: data.tool_calls||[], pendingConfirmation: data.pending_confirmation||null, timestamp: new Date(), model }]);
+      setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', content: reply, toolCalls: data.tool_calls || [], pendingConfirmation: data.pending_confirmation || null, timestamp: new Date(), model }]);
       await playTTS(reply);
     } catch {
-      setMessages(prev => [...prev, { id: (Date.now()+1).toString(), role: 'assistant', content: 'CONNECTION LOST. Ensure backend is running: python -m uvicorn main:app --reload --port 8000', timestamp: new Date() }]);
+      setMessages(prev => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', content: 'CONNECTION LOST. Ensure backend is running: python -m uvicorn main:app --reload --port 8000', timestamp: new Date() }]);
     } finally {
       setLoading(false);
       inputRef.current?.focus();
@@ -438,23 +520,12 @@ export default function Home() {
   useEffect(() => { sendMessageRef.current = sendMessage; }, [sendMessage]);
 
   const isBusy = loading || speaking || listening || capturing;
-  useEffect(() => { broadcastBusy(isBusy); }, [isBusy, broadcastBusy]);
 
   const { wakeListening, commandListening } = useWakeWord(
     wakeEnabled,
     useCallback((text: string) => { sendMessageRef.current(text); }, []),
     isBusy,
   );
-
-  const openPopup = () => {
-    if (popupRef.current && !popupRef.current.closed) { popupRef.current.focus(); return; }
-    const w = window.open('/listener', 'alpha-listener', 'width=220,height=340,toolbar=0,menubar=0,scrollbars=0,resizable=0');
-    if (w) {
-      popupRef.current = w;
-      setPopupOpen(true);
-      const poll = setInterval(() => { if (w.closed) { clearInterval(poll); setPopupOpen(false); popupRef.current = null; } }, 1000);
-    }
-  };
 
   const toggleMic = useCallback(async () => {
     if (listening) { mediaRecRef.current?.stop(); return; }
@@ -471,7 +542,7 @@ export default function Home() {
         if (blob.size < 1000) return;
         const fd = new FormData(); fd.append('audio', blob, 'recording.webm');
         try {
-          const res  = await fetch(`${BACKEND}/voice/stt`, { method: 'POST', body: fd });
+          const res = await fetch(`${BACKEND}/voice/stt`, { method: 'POST', body: fd });
           const data = await res.json();
           if (data.text?.trim()) await sendMessageRef.current(data.text.trim());
         } catch (e) { console.error('STT error:', e); }
@@ -485,128 +556,141 @@ export default function Home() {
   };
 
   const statusLabel =
-    capturing        ? 'CAPTURING...'  :
-    commandListening ? 'COMMAND...'    :
-    listening        ? 'LISTENING...'  :
-    speaking         ? 'SPEAKING...'   :
-    loading          ? 'PROCESSING...' :
-    wakeListening    ? 'WAKE ACTIVE'   : 'STANDBY';
+    capturing ? 'CAPTURING...' :
+    commandListening ? 'COMMAND...' :
+    listening ? 'LISTENING...' :
+    speaking ? 'SPEAKING...' :
+    loading ? 'PROCESSING...' :
+    wakeListening ? 'WAKE ACTIVE' : 'STANDBY';
 
   const statusColor =
-    capturing        ? '#ffd700'              :
-    commandListening ? '#50dc78'              :
-    listening        ? '#50dc78'              :
-    speaking         ? 'var(--accent)'        :
-    loading          ? 'var(--primary)'       :
-    wakeListening    ? 'rgba(80,160,255,0.9)' : 'var(--primary)';
+    capturing ? '#ffd700' :
+    commandListening ? '#50dc78' :
+    listening ? '#50dc78' :
+    speaking ? 'var(--accent)' :
+    loading ? 'var(--primary)' :
+    wakeListening ? 'rgba(80,160,255,0.9)' : 'var(--primary)';
 
   return (
-    <div style={{ display:'flex', flexDirection:'column', height:'100dvh', background:'var(--bg)', backgroundImage:'radial-gradient(ellipse at 50% 0%, rgba(0,210,200,0.05) 0%, transparent 60%)', overflow:'hidden' }}>
-      <div style={{ position:'fixed', inset:0, pointerEvents:'none', zIndex:99, background:'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px)' }} />
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', backgroundImage: 'radial-gradient(ellipse at 50% 0%, rgba(0,210,200,0.05) 0%, transparent 60%)', overflow: 'hidden' }}>
+      <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 99, background: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px)' }} />
 
-      <header style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'10px 20px', borderBottom:'1px solid var(--border)', background:'rgba(7,21,24,0.95)', backdropFilter:'blur(12px)', flexShrink:0, position:'relative', zIndex:10 }}>
-        <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+      <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 20px', borderBottom: '1px solid var(--border)', background: 'rgba(7,21,24,0.95)', backdropFilter: 'blur(12px)', flexShrink: 0, position: 'relative', zIndex: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-label="Alpha">
             <polygon points="16,2 30,28 2,28" stroke="var(--primary)" strokeWidth="1.5" fill="rgba(0,210,200,0.08)" />
             <polygon points="16,10 24,24 8,24" stroke="var(--primary)" strokeWidth="1" fill="rgba(0,210,200,0.12)" opacity="0.6" />
             <circle cx="16" cy="16" r="2" fill="var(--accent)" />
           </svg>
           <div>
-            <div style={{ fontFamily:'Orbitron, monospace', fontWeight:700, fontSize:16, letterSpacing:'0.15em', color:'var(--accent)' }}>ALPHA</div>
-            <div style={{ fontSize:10, color:'var(--text-muted)', letterSpacing:'0.2em', fontFamily:'Share Tech Mono, monospace' }}>TRADING ASSISTANT</div>
+            <div style={{ fontFamily: 'Orbitron, monospace', fontWeight: 700, fontSize: 16, letterSpacing: '0.15em', color: 'var(--accent)' }}>ALPHA</div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.2em', fontFamily: 'Share Tech Mono, monospace' }}>TRADING ASSISTANT</div>
           </div>
         </div>
 
-        <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <ModelBadge model={activeModel} hasImage={lastHadImage} />
 
-          <button onClick={openPopup} title="Open always-on listener popup" style={{ background:popupOpen?'rgba(0,210,200,0.12)':'rgba(0,210,200,0.05)', border:`1px solid ${popupOpen?'rgba(0,210,200,0.5)':'rgba(0,210,200,0.2)'}`, borderRadius:4, padding:'4px 10px', cursor:'pointer', fontSize:9, fontFamily:'Share Tech Mono, monospace', letterSpacing:'0.1em', color:popupOpen?'var(--primary)':'var(--text-muted)', display:'flex', alignItems:'center', gap:5 }}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
-            {popupOpen ? 'LISTENER ON' : 'POP OUT'}
+          {/* FLOAT button — replaces broken POP OUT popup */}
+          <button
+            onClick={() => setFloatOpen(v => !v)}
+            title="Pin a floating mini-orb on screen"
+            style={{ background: floatOpen ? 'rgba(0,210,200,0.12)' : 'rgba(0,210,200,0.05)', border: `1px solid ${floatOpen ? 'rgba(0,210,200,0.5)' : 'rgba(0,210,200,0.2)'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: floatOpen ? 'var(--primary)' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="5" r="3" /><path d="M12 8v13" /><path d="M5 14l7-6 7 6" /></svg>
+            {floatOpen ? 'FLOAT ON' : 'FLOAT'}
           </button>
 
-          <button onClick={() => setWakeEnabled(v => !v)} style={{ background:wakeEnabled?'rgba(80,160,255,0.08)':'rgba(255,68,102,0.08)', border:`1px solid ${wakeEnabled?'rgba(80,160,255,0.3)':'rgba(255,68,102,0.25)'}`, borderRadius:4, padding:'4px 10px', cursor:'pointer', fontSize:9, fontFamily:'Share Tech Mono, monospace', letterSpacing:'0.1em', color:wakeEnabled?'#50a0ff':'var(--red)', display:'flex', alignItems:'center', gap:5 }}>
+          <button onClick={() => setWakeEnabled(v => !v)} style={{ background: wakeEnabled ? 'rgba(80,160,255,0.08)' : 'rgba(255,68,102,0.08)', border: `1px solid ${wakeEnabled ? 'rgba(80,160,255,0.3)' : 'rgba(255,68,102,0.25)'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: wakeEnabled ? '#50a0ff' : 'var(--red)', display: 'flex', alignItems: 'center', gap: 5 }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3" /><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" /></svg>
             WAKE {wakeEnabled ? 'ON' : 'OFF'}
           </button>
 
-          <button onClick={() => { setVoiceEnabled(v=>!v); if (speaking && currentAudio.current) { currentAudio.current.pause(); setSpeaking(false); } }}
-            style={{ background:voiceEnabled?'rgba(0,210,200,0.08)':'rgba(255,68,102,0.08)', border:`1px solid ${voiceEnabled?'rgba(0,210,200,0.25)':'rgba(255,68,102,0.25)'}`, borderRadius:4, padding:'4px 10px', cursor:'pointer', fontSize:9, fontFamily:'Share Tech Mono, monospace', letterSpacing:'0.1em', color:voiceEnabled?'var(--primary)':'var(--red)', display:'flex', alignItems:'center', gap:5 }}>
+          <button onClick={() => { setVoiceEnabled(v => !v); if (speaking && currentAudio.current) { currentAudio.current.pause(); setSpeaking(false); } }}
+            style={{ background: voiceEnabled ? 'rgba(0,210,200,0.08)' : 'rgba(255,68,102,0.08)', border: `1px solid ${voiceEnabled ? 'rgba(0,210,200,0.25)' : 'rgba(255,68,102,0.25)'}`, borderRadius: 4, padding: '4px 10px', cursor: 'pointer', fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: voiceEnabled ? 'var(--primary)' : 'var(--red)', display: 'flex', alignItems: 'center', gap: 5 }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               {voiceEnabled ? <><path d="M11 5L6 9H2v6h4l5 4V5z" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /></> : <><path d="M11 5L6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>}
             </svg>
             {voiceEnabled ? 'VOICE ON' : 'VOICE OFF'}
           </button>
 
-          <div style={{ display:'flex', gap:16, fontFamily:'Share Tech Mono, monospace', fontSize:11 }}>
-            {['MNQ','MES','VIX'].map(sym => (
-              <span key={sym} style={{ color:'var(--text-muted)' }}>
-                <span style={{ color:'var(--primary)', marginRight:4 }}>{sym}</span>
-                <span style={{ color:'var(--text-faint)' }}>--</span>
+          <div style={{ display: 'flex', gap: 16, fontFamily: 'Share Tech Mono, monospace', fontSize: 11 }}>
+            {['MNQ', 'MES', 'VIX'].map(sym => (
+              <span key={sym} style={{ color: 'var(--text-muted)' }}>
+                <span style={{ color: 'var(--primary)', marginRight: 4 }}>{sym}</span>
+                <span style={{ color: 'var(--text-faint)' }}>--</span>
               </span>
             ))}
           </div>
 
-          <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:10, fontFamily:'Share Tech Mono, monospace', letterSpacing:'0.1em', color:backendStatus==='ok'?'var(--green)':backendStatus==='offline'?'var(--red)':'var(--text-muted)', background:'var(--surface-2)', padding:'4px 10px', borderRadius:4, border:`1px solid ${backendStatus==='ok'?'rgba(0,229,160,0.2)':backendStatus==='offline'?'rgba(255,68,102,0.2)':'var(--border)'}` }}>
-            <span style={{ width:5, height:5, borderRadius:'50%', display:'inline-block', background:backendStatus==='ok'?'var(--green)':backendStatus==='offline'?'var(--red)':'#555' }} />
-            {backendStatus==='ok' ? 'SYS ONLINE' : backendStatus==='offline' ? 'SYS OFFLINE' : 'INIT...'}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: backendStatus === 'ok' ? 'var(--green)' : backendStatus === 'offline' ? 'var(--red)' : 'var(--text-muted)', background: 'var(--surface-2)', padding: '4px 10px', borderRadius: 4, border: `1px solid ${backendStatus === 'ok' ? 'rgba(0,229,160,0.2)' : backendStatus === 'offline' ? 'rgba(255,68,102,0.2)' : 'var(--border)'}` }}>
+            <span style={{ width: 5, height: 5, borderRadius: '50%', display: 'inline-block', background: backendStatus === 'ok' ? 'var(--green)' : backendStatus === 'offline' ? 'var(--red)' : '#555' }} />
+            {backendStatus === 'ok' ? 'SYS ONLINE' : backendStatus === 'offline' ? 'SYS OFFLINE' : 'INIT...'}
           </div>
         </div>
       </header>
 
-      <div style={{ display:'flex', flex:1, overflow:'hidden' }}>
-        <div style={{ width:260, flexShrink:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:16, borderRight:'1px solid var(--border)', background:'rgba(4,15,18,0.7)', position:'relative', padding:'24px 0' }}>
-          <div style={{ position:'relative' }}>
-            <div style={{ position:'relative', padding:12 }}>
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        <div style={{ width: 260, flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, borderRight: '1px solid var(--border)', background: 'rgba(4,15,18,0.7)', position: 'relative', padding: '24px 0' }}>
+          <div style={{ position: 'relative' }}>
+            <div style={{ position: 'relative', padding: 12 }}>
               <HudCorner pos="tl" /><HudCorner pos="tr" /><HudCorner pos="bl" /><HudCorner pos="br" />
-              <AlphaOrb speaking={speaking} listening={listening||commandListening} wakeListening={wakeListening&&!commandListening&&!listening} />
+              <AlphaOrb speaking={speaking} listening={listening || commandListening} wakeListening={wakeListening && !commandListening && !listening} />
             </div>
           </div>
 
-          <div style={{ textAlign:'center', fontFamily:'Share Tech Mono, monospace', fontSize:10, letterSpacing:'0.15em' }}>
-            <div style={{ color:statusColor, marginBottom:4, transition:'color 200ms ease' }}>{statusLabel}</div>
-            <div style={{ color:'var(--text-faint)' }}>MNQ - MES FUTURES</div>
+          <div style={{ textAlign: 'center', fontFamily: 'Share Tech Mono, monospace', fontSize: 10, letterSpacing: '0.15em' }}>
+            <div style={{ color: statusColor, marginBottom: 4, transition: 'color 200ms ease' }}>{statusLabel}</div>
+            <div style={{ color: 'var(--text-faint)' }}>MNQ - MES FUTURES</div>
           </div>
 
           {wakeListening && !commandListening && !isBusy && (
-            <div style={{ fontSize:9, fontFamily:'Share Tech Mono, monospace', letterSpacing:'0.1em', color:'rgba(80,160,255,0.6)', textAlign:'center', border:'1px solid rgba(80,160,255,0.15)', borderRadius:4, padding:'4px 10px' }}>SAY &quot;ALPHA ...&quot; TO ACTIVATE</div>
+            <div style={{ fontSize: 9, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: 'rgba(80,160,255,0.6)', textAlign: 'center', border: '1px solid rgba(80,160,255,0.15)', borderRadius: 4, padding: '4px 10px' }}>SAY &quot;ALPHA ...&quot; TO ACTIVATE</div>
           )}
 
-          {!popupOpen && (
-            <div onClick={openPopup} style={{ fontSize:9, fontFamily:'Share Tech Mono, monospace', letterSpacing:'0.08em', color:'var(--text-faint)', textAlign:'center', cursor:'pointer', border:'1px dashed rgba(0,210,200,0.15)', borderRadius:4, padding:'5px 10px', maxWidth:180 }}>
-              <span style={{ color:'var(--primary)' }}>POP OUT</span> for cross-tab listening
-            </div>
-          )}
-
-          <div style={{ display:'flex', flexDirection:'column', gap:6, width:'100%', padding:'0 16px', marginTop:8 }}>
-            {['Alpha, MNQ market outlook','Alpha, key support levels','Alpha, look at my screen','Alpha, pre-market analysis'].map(prompt => (
-              <button key={prompt} onClick={() => { setInput(prompt); setTimeout(()=>inputRef.current?.focus(),50); }}
-                style={{ background:'rgba(0,210,200,0.04)', border:'1px solid var(--border)', borderRadius:4, padding:'6px 10px', color:'var(--text-muted)', fontSize:10, fontFamily:'Share Tech Mono, monospace', letterSpacing:'0.05em', cursor:'pointer', textAlign:'left', transition:'all 150ms ease' }}
-                onMouseEnter={e=>{(e.target as HTMLElement).style.borderColor='var(--primary)';(e.target as HTMLElement).style.color='var(--primary)';}}
-                onMouseLeave={e=>{(e.target as HTMLElement).style.borderColor='var(--border)';(e.target as HTMLElement).style.color='var(--text-muted)';}}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', padding: '0 16px', marginTop: 8 }}>
+            {['Alpha, MNQ market outlook', 'Alpha, key support levels', 'Alpha, look at my screen', 'Alpha, pre-market analysis'].map(prompt => (
+              <button key={prompt} onClick={() => { setInput(prompt); setTimeout(() => inputRef.current?.focus(), 50); }}
+                style={{ background: 'rgba(0,210,200,0.04)', border: '1px solid var(--border)', borderRadius: 4, padding: '6px 10px', color: 'var(--text-muted)', fontSize: 10, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.05em', cursor: 'pointer', textAlign: 'left', transition: 'all 150ms ease' }}
+                onMouseEnter={e => { (e.target as HTMLElement).style.borderColor = 'var(--primary)'; (e.target as HTMLElement).style.color = 'var(--primary)'; }}
+                onMouseLeave={e => { (e.target as HTMLElement).style.borderColor = 'var(--border)'; (e.target as HTMLElement).style.color = 'var(--text-muted)'; }}
               >&gt; {prompt}</button>
             ))}
           </div>
         </div>
 
-        <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <ChatWindow messages={messages} loading={loading} />
-          <div style={{ padding:'12px 16px', borderTop:'1px solid var(--border)', background:'rgba(7,21,24,0.95)', flexShrink:0 }}>
-            <div style={{ display:'flex', gap:10, background:'var(--surface-2)', border:'1px solid var(--border)', borderRadius:6, padding:'10px 14px' }}>
-              <span style={{ color:capturing?'#ffd700':'var(--primary)', fontFamily:'Share Tech Mono, monospace', fontSize:13, alignSelf:'flex-end', paddingBottom:1 }}>{'>'}</span>
-              <textarea ref={inputRef} value={input} onChange={e=>setInput(e.target.value)} onKeyDown={handleKeyDown}
+          <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'rgba(7,21,24,0.95)', flexShrink: 0 }}>
+            <div style={{ display: 'flex', gap: 10, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 6, padding: '10px 14px' }}>
+              <span style={{ color: capturing ? '#ffd700' : 'var(--primary)', fontFamily: 'Share Tech Mono, monospace', fontSize: 13, alignSelf: 'flex-end', paddingBottom: 1 }}>{'>'}</span>
+              <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
                 placeholder='Ask Alpha anything... or say "Alpha, look at my screen"' rows={1}
-                style={{ flex:1, background:'transparent', border:'none', outline:'none', color:'var(--text)', font:'inherit', fontSize:14, resize:'none', minHeight:24, maxHeight:120, overflowY:'auto', lineHeight:1.5 }} />
-              <MicButton listening={listening} onClick={toggleMic} disabled={loading||speaking||capturing} />
-              <button onClick={()=>sendMessage()} disabled={loading||!input.trim()||capturing}
-                style={{ background:loading||!input.trim()?'rgba(0,210,200,0.08)':'rgba(0,210,200,0.15)', color:loading||!input.trim()?'var(--text-faint)':'var(--primary)', border:`1px solid ${loading||!input.trim()?'var(--border)':'var(--primary)'}`, borderRadius:4, padding:'6px 18px', cursor:loading||!input.trim()?'not-allowed':'pointer', fontFamily:'Orbitron, monospace', fontWeight:500, fontSize:10, letterSpacing:'0.15em', transition:'all 150ms ease', alignSelf:'flex-end' }}>
+                style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--text)', font: 'inherit', fontSize: 14, resize: 'none', minHeight: 24, maxHeight: 120, overflowY: 'auto', lineHeight: 1.5 }} />
+              <MicButton listening={listening} onClick={toggleMic} disabled={loading || speaking || capturing} />
+              <button onClick={() => sendMessage()} disabled={loading || !input.trim() || capturing}
+                style={{ background: loading || !input.trim() ? 'rgba(0,210,200,0.08)' : 'rgba(0,210,200,0.15)', color: loading || !input.trim() ? 'var(--text-faint)' : 'var(--primary)', border: `1px solid ${loading || !input.trim() ? 'var(--border)' : 'var(--primary)'}`, borderRadius: 4, padding: '6px 18px', cursor: loading || !input.trim() ? 'not-allowed' : 'pointer', fontFamily: 'Orbitron, monospace', fontWeight: 500, fontSize: 10, letterSpacing: '0.15em', transition: 'all 150ms ease', alignSelf: 'flex-end' }}>
                 {capturing ? 'CAPTURING' : loading ? '...' : 'SEND'}
               </button>
             </div>
-            <p style={{ fontSize:10, color:'var(--text-faint)', marginTop:6, textAlign:'center', fontFamily:'Share Tech Mono, monospace', letterSpacing:'0.1em' }}>ALPHA v1.0 - LOCAL - NOT FINANCIAL ADVICE</p>
+            <p style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 6, textAlign: 'center', fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em' }}>ALPHA v1.0 - LOCAL - NOT FINANCIAL ADVICE</p>
           </div>
         </div>
       </div>
+
+      {/* Floating mini-orb overlay — same page, same mic permission, no popup */}
+      {floatOpen && (
+        <FloatingListener
+          speaking={speaking}
+          listening={listening}
+          commandListening={commandListening}
+          wakeListening={wakeListening}
+          isBusy={isBusy}
+          statusLabel={statusLabel}
+          statusColor={statusColor}
+          onClose={() => setFloatOpen(false)}
+        />
+      )}
     </div>
   );
 }
