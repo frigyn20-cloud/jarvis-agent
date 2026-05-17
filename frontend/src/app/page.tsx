@@ -9,6 +9,7 @@ const WAKE_WORD = 'alpha';
 const WAKE_ALTS = ['alfa', 'elfa', 'alva', 'alvah', 'alphas'];
 const COMMAND_SILENCE_MS = 2500;
 const WAKE_ONLY_TIMEOUT_MS = 5000;
+const MARKET_POLL_MS = 30_000;
 
 const SCREEN_TRIGGERS = [
   'look at my screen', 'what do you see', 'analyze my chart',
@@ -31,6 +32,21 @@ export interface Message {
   hasImage?: boolean;
 }
 
+interface QuoteData {
+  symbol: string;
+  price: number;
+  change: number | null;
+  change_pct: number | null;
+  source: string;
+}
+
+interface MarketSnapshot {
+  MNQ?: QuoteData;
+  MES?: QuoteData;
+  VIX?: QuoteData;
+  [key: string]: QuoteData | undefined;
+}
+
 function normT(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim();
 }
@@ -49,14 +65,6 @@ function afterWakeText(raw: string): string {
 
 // ---------------------------------------------------------------------------
 // Screen capture — locked tab stream
-//
-// Strategy:
-//   1. User clicks "CHART TAB" button once → getDisplayMedia() prompts them
-//      to pick their TradingView tab → we store the MediaStream.
-//   2. On every screen-request we grab a frame from that locked stream.
-//   3. If the stream has ended (tab closed/changed) we clear it so the next
-//      request re-prompts.
-//   4. If no locked stream exists we fall back to a fresh getDisplayMedia().
 // ---------------------------------------------------------------------------
 let lockedStream: MediaStream | null = null;
 
@@ -69,8 +77,6 @@ function releaseLocked() {
 
 async function acquireStream(): Promise<MediaStream | null> {
   try {
-    // preferCurrentTab: false forces the browser to show the full tab picker
-    // so the user can choose their TradingView tab, not just Alpha.
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: { width: 1920, height: 1080 } as MediaTrackConstraints,
       audio: false,
@@ -87,7 +93,6 @@ async function frameFromStream(stream: MediaStream): Promise<string | null> {
   const track = stream.getVideoTracks()[0];
   if (!track || track.readyState === 'ended') return null;
   try {
-    // ImageCapture API — best quality, no flicker
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const ic = new (window as any).ImageCapture(track);
     const bitmap = await ic.grabFrame();
@@ -96,7 +101,6 @@ async function frameFromStream(stream: MediaStream): Promise<string | null> {
     canvas.getContext('2d')!.drawImage(bitmap, 0, 0);
     return canvas.toDataURL('image/png').split(',')[1];
   } catch {
-    // Fallback: render via <video>
     const video = document.createElement('video');
     video.srcObject = new MediaStream([track]);
     await new Promise<void>(r => { video.onloadedmetadata = () => r(); });
@@ -109,36 +113,25 @@ async function frameFromStream(stream: MediaStream): Promise<string | null> {
   }
 }
 
-// Called when user says "look at my chart" etc.
 async function captureScreen(): Promise<string | null> {
-  // If we have a locked stream, try to reuse it
   if (lockedStream) {
     const track = lockedStream.getVideoTracks()[0];
-    if (track && track.readyState !== 'ended') {
-      return frameFromStream(lockedStream);
-    }
-    // Stream died — clear it and fall through to re-prompt
+    if (track && track.readyState !== 'ended') return frameFromStream(lockedStream);
     releaseLocked();
   }
-  // No locked stream — ask user to pick a tab
   const stream = await acquireStream();
   if (!stream) return null;
   const frame = await frameFromStream(stream);
-  // Stop the one-off stream immediately (don't lock it)
   stream.getTracks().forEach(t => t.stop());
   return frame;
 }
 
-// Called by the "CHART TAB" button — lets user lock onto a specific tab
 async function lockChartTab(): Promise<boolean> {
   releaseLocked();
   const stream = await acquireStream();
   if (!stream) return false;
   lockedStream = stream;
-  // Auto-release if user closes the tab share
-  stream.getVideoTracks()[0]?.addEventListener('ended', () => {
-    lockedStream = null;
-  });
+  stream.getVideoTracks()[0]?.addEventListener('ended', () => { lockedStream = null; });
   return true;
 }
 
@@ -245,6 +238,37 @@ function MicButton({ listening, onClick, disabled }: { listening: boolean; onCli
       </svg>
       {listening && <span style={{ position: 'absolute', top: 3, right: 3, width: 5, height: 5, borderRadius: '50%', background: '#50dc78', animation: 'blink 0.8s ease-in-out infinite' }} />}
     </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Live ticker component
+// ---------------------------------------------------------------------------
+function LiveTicker({ snapshot }: { snapshot: MarketSnapshot }) {
+  const symbols: (keyof MarketSnapshot)[] = ['MNQ', 'MES', 'VIX'];
+  return (
+    <div style={{ display: 'flex', gap: 16, fontFamily: 'Share Tech Mono, monospace', fontSize: 11 }}>
+      {symbols.map(sym => {
+        const q = snapshot[sym];
+        const isTV = q?.source === 'tradingview';
+        const chg = q?.change_pct;
+        const up = chg != null ? chg >= 0 : null;
+        const color = up === null ? 'var(--text-faint)' : up ? '#50dc78' : 'var(--red)';
+        return (
+          <span key={sym} style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1 }}>
+            <span style={{ color: 'var(--text-muted)', fontSize: 9, letterSpacing: '0.15em' }}>
+              {sym}{isTV && <span style={{ color: '#ffd700', marginLeft: 3 }} title="TradingView RT">●</span>}
+            </span>
+            <span style={{ color, fontWeight: 600, letterSpacing: '0.05em' }}>
+              {q ? q.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '--'}
+            </span>
+            {q && chg != null && (
+              <span style={{ color, fontSize: 9 }}>{up ? '▲' : '▼'}{Math.abs(chg).toFixed(2)}%</span>
+            )}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -431,7 +455,7 @@ function FloatingListener({
         <span style={{ fontSize: 8, letterSpacing: '0.12em', color: statusColor, fontFamily: 'monospace' }}>{statusLabel}</span>
       </div>
       {!isBusy && wakeListening && !commandListening && (
-        <div style={{ fontSize: 7, color: 'rgba(80,160,255,0.6)', fontFamily: 'monospace', letterSpacing: '0.08em', textAlign: 'center', padding: '0 8px' }}>say “Alpha…”</div>
+        <div style={{ fontSize: 7, color: 'rgba(80,160,255,0.6)', fontFamily: 'monospace', letterSpacing: '0.08em', textAlign: 'center', padding: '0 8px' }}>say “Alpha…” to activate</div>
       )}
     </div>
   );
@@ -443,7 +467,7 @@ function FloatingListener({
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([{
     id: '0', role: 'assistant',
-    content: 'ALPHA ONLINE. Click \"CHART TAB\" in the header to lock onto your TradingView tab, then say \"Alpha, analyze my chart\" anytime.',
+    content: 'ALPHA ONLINE. Click "CHART TAB" in the header to lock onto your TradingView tab, then say "Alpha, analyze my chart" anytime.',
     timestamp: new Date(), model: 'claude-sonnet-4-6',
   }]);
   const [input, setInput] = useState('');
@@ -457,8 +481,8 @@ export default function Home() {
   const [lastHadImage, setLastHadImage] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'ok' | 'offline'>('checking');
   const [floatOpen, setFloatOpen] = useState(false);
-  // chartTabLocked: true when user has locked onto an external tab stream
   const [chartTabLocked, setChartTabLocked] = useState(false);
+  const [marketSnapshot, setMarketSnapshot] = useState<MarketSnapshot>({});
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const mediaRecRef = useRef<MediaRecorder | null>(null);
@@ -466,13 +490,30 @@ export default function Home() {
   const currentAudio = useRef<HTMLAudioElement | null>(null);
   const sendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
 
+  // Health check
   useEffect(() => {
     fetch(`${BACKEND}/health`)
       .then(r => r.ok ? setBackendStatus('ok') : setBackendStatus('offline'))
       .catch(() => setBackendStatus('offline'));
   }, []);
 
-  // Keep chartTabLocked in sync if the user closes the browser share
+  // Live market data polling
+  useEffect(() => {
+    const fetchMarket = async () => {
+      try {
+        const res = await fetch(`${BACKEND}/market/live`);
+        if (res.ok) {
+          const data: MarketSnapshot = await res.json();
+          setMarketSnapshot(data);
+        }
+      } catch { /* backend offline — silently skip */ }
+    };
+    fetchMarket(); // immediate fetch on mount
+    const interval = setInterval(fetchMarket, MARKET_POLL_MS);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Sync chartTabLocked with lockedStream
   useEffect(() => {
     const interval = setInterval(() => {
       if (chartTabLocked && !lockedStream) setChartTabLocked(false);
@@ -482,7 +523,6 @@ export default function Home() {
 
   const handleLockChartTab = useCallback(async () => {
     if (chartTabLocked) {
-      // Toggle off — release the stream
       releaseLocked();
       setChartTabLocked(false);
       setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Chart tab unlinked. I will prompt you to pick a tab on the next screen request.', timestamp: new Date() }]);
@@ -525,7 +565,7 @@ export default function Home() {
       imageBase64 = await captureScreen();
       setCapturing(false);
       if (!imageBase64) {
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Screen capture cancelled or failed. Try clicking \"CHART TAB\" first to lock onto your TradingView tab.', timestamp: new Date() }]);
+        setMessages(prev => [...prev, { id: Date.now().toString(), role: 'assistant', content: 'Screen capture cancelled or failed. Try clicking "CHART TAB" first to lock onto your TradingView tab.', timestamp: new Date() }]);
         return;
       }
     }
@@ -660,14 +700,8 @@ export default function Home() {
             {voiceEnabled ? 'VOICE ON' : 'VOICE OFF'}
           </button>
 
-          <div style={{ display: 'flex', gap: 16, fontFamily: 'Share Tech Mono, monospace', fontSize: 11 }}>
-            {['MNQ', 'MES', 'VIX'].map(sym => (
-              <span key={sym} style={{ color: 'var(--text-muted)' }}>
-                <span style={{ color: 'var(--primary)', marginRight: 4 }}>{sym}</span>
-                <span style={{ color: 'var(--text-faint)' }}>--</span>
-              </span>
-            ))}
-          </div>
+          {/* Live tickers */}
+          <LiveTicker snapshot={marketSnapshot} />
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, fontFamily: 'Share Tech Mono, monospace', letterSpacing: '0.1em', color: backendStatus === 'ok' ? 'var(--green)' : backendStatus === 'offline' ? 'var(--red)' : 'var(--text-muted)', background: 'var(--surface-2)', padding: '4px 10px', borderRadius: 4, border: `1px solid ${backendStatus === 'ok' ? 'rgba(0,229,160,0.2)' : backendStatus === 'offline' ? 'rgba(255,68,102,0.2)' : 'var(--border)'}` }}>
             <span style={{ width: 5, height: 5, borderRadius: '50%', display: 'inline-block', background: backendStatus === 'ok' ? 'var(--green)' : backendStatus === 'offline' ? 'var(--red)' : '#555' }} />
