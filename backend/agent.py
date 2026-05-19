@@ -22,7 +22,6 @@ CLAUDE_MODEL      = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 STRATEGY_FILE = os.path.join(os.path.dirname(__file__), "strategy.md")
 
 def load_strategy() -> str:
-    """Read strategy.md from disk. Returns empty string if file missing."""
     try:
         with open(STRATEGY_FILE, "r", encoding="utf-8") as f:
             return f.read()
@@ -30,14 +29,13 @@ def load_strategy() -> str:
         logger.warning("strategy.md not found — strategy context will be empty.")
         return ""
 
-# ── Auto-load all memories into prompt ──────────────────────────────────────
+
 def load_memory_context() -> str:
-    """Fetch all saved memories and format them for injection into the prompt."""
     try:
         memories = get_all_memories()
         if not memories:
             return ""
-        lines = ["== LONG-TERM MEMORY (facts you know about the user and their preferences) =="]
+        lines = ["== LONG-TERM MEMORY =="]
         for m in memories:
             lines.append(f"- {m['key']}: {m['value']}")
         return "\n".join(lines)
@@ -45,7 +43,7 @@ def load_memory_context() -> str:
         logger.warning(f"Could not load memories: {e}")
         return ""
 
-# ─── Claude triggers ─────────────────────────────────────────────────────────
+
 CLAUDE_TRIGGERS = [
     "mnq", "mes", "nq futures", "es futures",
     "nasdaq futures", "s&p futures", "sp500", "spx", "ndx",
@@ -103,9 +101,10 @@ CLAUDE_TRIGGERS = [
     "my risk", "my strategy", "my preference",
     "setup", "current setup", "what's the setup", "market is open",
     "it's open", "open now", "just opened", "session started",
+    "run the model", "full analysis", "is there a trade", "any trade",
+    "pb blake", "what do you see", "give me the setup",
 ]
 
-# ─── Base personality shared by all prompts ──────────────────────────────────
 BASE_PERSONALITY = """
 You are Alpha, an AI-powered trading assistant and general assistant.
 Personality: calm, confident, professional — like a trusted British butler who is also a seasoned trader.
@@ -115,50 +114,46 @@ Be concise. Two to four sentences for most answers. Do not pad responses.
 When uncertain, say so plainly. Do not fabricate data or price levels.
 Respond as if speaking aloud — your words will be read by a text-to-speech engine.
 
-CRITICAL TOOL RULE: You MUST call tools BEFORE answering any question about live market data,
-current price, setup, bias, or trading conditions. NEVER answer from memory or prior knowledge
-for anything time-sensitive. If you do not call get_market_overview before discussing the
-current setup, that is a critical error. Call the tool first. Always.
+CRITICAL TOOL RULES (highest priority — always follow these):
+1. For ANY question about bias, setup, or market direction — call get_full_setup first. Do not guess.
+2. For ANY question about live price or market conditions — call get_market_overview first.
+3. For ANY question about what time it is or what session we are in — call get_time first.
+4. Never answer a market or trading question from memory. Always use the tools.
+5. If get_full_setup returns 'no candle data' — say so plainly and explain TradingView webhooks are needed.
 """
 
 
 def build_system_prompt(include_strategy: bool = True, include_tools: bool = True, session_context: str = "") -> str:
-    """Assemble the full system prompt dynamically on every request."""
     parts = [BASE_PERSONALITY]
 
-    # ── Long-term memory (always injected) ──
     memory_ctx = load_memory_context()
     if memory_ctx:
         parts.append(memory_ctx)
 
-    # ── Trading strategy ──
     if include_strategy:
         strategy = load_strategy()
         if strategy:
             parts.append(strategy)
 
-    # ── Session state ──
     if session_context:
         parts.append(session_context)
 
-    # ── Tool guidance ──
     if include_tools:
         parts.append("""
-TOOLS AVAILABLE: web_search, calculator, get_time, summarize_text, remember, recall, open_url, get_market_quote, get_market_overview.
+TOOLS AVAILABLE: web_search, calculator, get_time, summarize_text, remember, recall, open_url,
+get_market_quote, get_market_overview, get_bias, get_full_setup.
 
-MANDATORY TOOL USE — follow these rules strictly:
-- ALWAYS call get_market_overview FIRST when the user asks about the setup, current conditions, or market open. Do not speak before calling this tool.
-- ALWAYS call get_time to confirm session (pre-market vs RTH) before making any time-based statement.
-- ALWAYS call web_search for any news, catalysts, economic releases, or current events affecting NQ/ES.
-- Use calculator for P&L, position sizing, R:R math.
-- Use remember to save any new fact the user tells you (name, risk preference, account size, etc.).
-- Use recall to look up anything the user has told you before.
-- When asked about a setup: call get_market_overview and get_time first, then walk through the ICT model steps in plain spoken language using the live data.
-- Never give financial advice. Present analysis only.
-- Never answer a market question without first calling the relevant live data tool.
+TOOL SELECTION GUIDE:
+- "what is the setup" / "run the model" / "any trade" / "give me the setup" → call get_full_setup("MNQ") AND get_market_overview
+- "what is the bias" / "htf direction" / "are we bullish or bearish" → call get_bias("MNQ")
+- "what's the price" / "where is MNQ" / "market conditions" → call get_market_overview
+- "what time is it" / "what session" → call get_time
+- news / catalysts / economic data → call web_search
+- P&L / position size / R:R math → call calculator
+- Save a fact → call remember; Recall a fact → call recall
+- NEVER answer a setup or bias question without first calling get_full_setup or get_bias.
 """)
 
-    # ── Vision note ──
     parts.append("""
 VISION: When an image is provided, it is a screenshot of the user's trading screen (likely TradingView).
 Analyze it using the ICT model from the strategy. Walk through structure, FVGs, iFVGs, bias.
@@ -221,7 +216,6 @@ class AgentState(TypedDict):
 def agent_node(state: AgentState):
     messages_in = state["messages"]
 
-    # Detect last human message text + image
     last_human = ""
     has_image  = False
     last_msg   = next((m for m in reversed(messages_in) if isinstance(m, HumanMessage)), None)
@@ -232,26 +226,24 @@ def agent_node(state: AgentState):
             has_image  = any(c.get("type") == "image" for c in last_msg.content if isinstance(c, dict))
             last_human = " ".join(c.get("text", "") for c in last_msg.content if isinstance(c, dict) and c.get("type") == "text")
 
-    use_claude   = needs_claude(last_human, has_image)
-    routed_to    = "groq"
+    use_claude    = needs_claude(last_human, has_image)
+    routed_to     = "groq"
     used_fallback = False
-    response     = None
+    response      = None
 
-    # Session state
     session = get_session()
     session_context = f"== CURRENT SESSION STATE ==\n{session.checklist_summary()}"
 
-    # Build the full dynamic system prompt (memories + strategy + session)
     system_prompt = build_system_prompt(
         include_strategy=True,
-        include_tools=use_claude,  # only give tool guidance to Claude (Groq may not support tools)
+        include_tools=use_claude,
         session_context=session_context,
     )
 
     if use_claude:
         try:
-            system  = SystemMessage(content=system_prompt)
-            llm     = get_claude_llm().bind_tools(ALL_TOOLS)
+            system   = SystemMessage(content=system_prompt)
+            llm      = get_claude_llm().bind_tools(ALL_TOOLS)
             response = llm.invoke([system] + messages_in)
             routed_to = "claude"
             logger.info(f"[Alpha] CLAUDE -> {CLAUDE_MODEL} | vision={has_image} | {last_human[:60]}")
@@ -262,14 +254,12 @@ def agent_node(state: AgentState):
 
     if not use_claude:
         try:
-            # Groq gets full prompt too (strategy + memories) but no tool definitions
             system = SystemMessage(content=build_system_prompt(
                 include_strategy=True,
                 include_tools=False,
                 session_context=session_context,
             ))
             llm = get_groq_llm()
-            # Strip images for Groq (vision not supported)
             text_only = []
             for m in messages_in:
                 if isinstance(m, HumanMessage) and isinstance(m.content, list):
@@ -333,7 +323,7 @@ APP_GRAPH = build_graph()
 
 async def run_agent(message: str, history: list[dict], image_base64: Optional[str] = None) -> dict:
     lc_messages = []
-    for msg in history[-12:]:  # keep a bit more history
+    for msg in history[-12:]:
         if msg["role"] == "user":        lc_messages.append(HumanMessage(content=msg["content"]))
         elif msg["role"] == "assistant": lc_messages.append(AIMessage(content=msg["content"]))
 
