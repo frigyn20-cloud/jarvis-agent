@@ -101,6 +101,8 @@ CLAUDE_TRIGGERS = [
     "look at this", "can you see", "chart analysis",
     "remember", "recall", "do you know", "my name", "my account",
     "my risk", "my strategy", "my preference",
+    "setup", "current setup", "what's the setup", "market is open",
+    "it's open", "open now", "just opened", "session started",
 ]
 
 # ─── Base personality shared by all prompts ──────────────────────────────────
@@ -112,6 +114,11 @@ Speak in natural, conversational sentences. Never use bullet points, tables, pip
 Be concise. Two to four sentences for most answers. Do not pad responses.
 When uncertain, say so plainly. Do not fabricate data or price levels.
 Respond as if speaking aloud — your words will be read by a text-to-speech engine.
+
+CRITICAL TOOL RULE: You MUST call tools BEFORE answering any question about live market data,
+current price, setup, bias, or trading conditions. NEVER answer from memory or prior knowledge
+for anything time-sensitive. If you do not call get_market_overview before discussing the
+current setup, that is a critical error. Call the tool first. Always.
 """
 
 
@@ -137,13 +144,18 @@ def build_system_prompt(include_strategy: bool = True, include_tools: bool = Tru
     # ── Tool guidance ──
     if include_tools:
         parts.append("""
-TOOLS AVAILABLE: web_search, calculator, get_time, summarize_text, remember, recall, open_url.
-- ALWAYS use web_search for current prices, news, live data, economic releases.
+TOOLS AVAILABLE: web_search, calculator, get_time, summarize_text, remember, recall, open_url, get_market_quote, get_market_overview.
+
+MANDATORY TOOL USE — follow these rules strictly:
+- ALWAYS call get_market_overview FIRST when the user asks about the setup, current conditions, or market open. Do not speak before calling this tool.
+- ALWAYS call get_time to confirm session (pre-market vs RTH) before making any time-based statement.
+- ALWAYS call web_search for any news, catalysts, economic releases, or current events affecting NQ/ES.
 - Use calculator for P&L, position sizing, R:R math.
 - Use remember to save any new fact the user tells you (name, risk preference, account size, etc.).
 - Use recall to look up anything the user has told you before.
-- When asked about a setup: walk through the ICT model steps in plain spoken language.
+- When asked about a setup: call get_market_overview and get_time first, then walk through the ICT model steps in plain spoken language using the live data.
 - Never give financial advice. Present analysis only.
+- Never answer a market question without first calling the relevant live data tool.
 """)
 
     # ── Vision note ──
