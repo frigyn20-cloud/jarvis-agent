@@ -1,6 +1,7 @@
 import numexpr
 import datetime
 import webbrowser
+from zoneinfo import ZoneInfo
 from langchain_core.tools import tool
 from memory import save_memory, search_memory
 from market_data import get_quote, get_market_snapshot
@@ -8,6 +9,8 @@ import asyncio
 import os
 from dotenv import load_dotenv
 load_dotenv()
+
+EASTERN = ZoneInfo("America/New_York")
 
 
 def _do_search(query: str) -> str:
@@ -41,6 +44,33 @@ def _do_search(query: str) -> str:
     return "No results found."
 
 
+def _get_session_label(now_et: datetime.datetime) -> str:
+    """Return a human-readable trading session label for a given ET datetime."""
+    t = now_et.time()
+    wd = now_et.weekday()  # 0=Mon, 6=Sun
+    if wd >= 5:
+        return "Weekend — futures only (Globex)"
+    if t < datetime.time(4, 0):
+        return "Overnight / Globex"
+    if t < datetime.time(9, 30):
+        return "Pre-Market"
+    if t < datetime.time(16, 0):
+        return "RTH (Regular Trading Hours) — market is OPEN"
+    if t < datetime.time(20, 0):
+        return "After-Hours"
+    return "Overnight / Globex"
+
+
+@tool
+def get_time(_: str = "") -> str:
+    """Return the current date and time in Eastern Time (ET), with trading session label."""
+    now_et = datetime.datetime.now(tz=EASTERN)
+    session = _get_session_label(now_et)
+    return (
+        f"{now_et.strftime('%A, %B %d %Y — %I:%M %p')} ET  |  Session: {session}"
+    )
+
+
 @tool
 def calculator(expression: str) -> str:
     """
@@ -52,13 +82,6 @@ def calculator(expression: str) -> str:
         return str(float(result))
     except Exception as e:
         return f"Error evaluating expression: {e}"
-
-
-@tool
-def get_time(_: str = "") -> str:
-    """Return the current date and time."""
-    now = datetime.datetime.now()
-    return now.strftime("%A, %B %d %Y — %I:%M %p")
 
 
 @tool
@@ -174,7 +197,12 @@ def get_market_overview(_: str = "") -> str:
         snapshot = loop.run_until_complete(get_market_snapshot())
         loop.close()
 
-    lines = []
+    # Include current ET time and session in the snapshot
+    now_et = datetime.datetime.now(tz=EASTERN)
+    session = _get_session_label(now_et)
+    header = f"Time: {now_et.strftime('%I:%M %p')} ET  |  Session: {session}"
+
+    lines = [header]
     for sym, q in snapshot.items():
         if "error" in q:
             lines.append(f"{sym}: unavailable")
