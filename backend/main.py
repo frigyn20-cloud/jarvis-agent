@@ -1,5 +1,6 @@
 import os
 import base64
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -15,11 +16,26 @@ from pb_blake import (
     evaluate_setup, get_setup_status,
     push_alert_if_new, get_pending_alerts,
 )
+from backfill import run_backfill
 import datetime
 
 load_dotenv()
 
-app = FastAPI(title="Alpha Trading Assistant")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Run startup tasks before the server begins accepting requests."""
+    print("[Alpha] Starting candle backfill...")
+    try:
+        summary = run_backfill()
+        print(f"[Alpha] Backfill complete: {summary}")
+    except Exception as e:
+        print(f"[Alpha] Backfill failed (non-fatal): {e}")
+    yield  # server is now live
+    # shutdown tasks can go here if needed
+
+
+app = FastAPI(title="Alpha Trading Assistant", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -170,6 +186,16 @@ def setup_alerts():
 def setup_candles():
     """Debug: how many candles are stored per (symbol, timeframe)."""
     return CANDLE_STORE.summary()
+
+
+@app.get("/setup/backfill")
+async def trigger_backfill():
+    """Manually re-trigger a backfill — useful after a restart without live market data."""
+    try:
+        summary = run_backfill()
+        return {"status": "ok", "summary": summary}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 
 @app.post("/setup/inject")

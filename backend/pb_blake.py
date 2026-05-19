@@ -31,7 +31,18 @@ from typing import Literal, Optional
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-MAX_CANDLES = 200          # rolling window per (symbol, tf)
+# Per-timeframe rolling window sizes
+# Higher TFs need fewer candles — structure is visible in less history
+MAX_CANDLES_PER_TF: dict[str, int] = {
+    "4H":  30,
+    "1H":  50,
+    "30M": 75,
+    "15M": 100,
+    "5M":  150,
+    "1M":  200,
+}
+MAX_CANDLES = 200  # fallback for unknown timeframes
+
 BIAS_TF     = ["4H", "1H"]           # timeframes for bias
 LIQ_TF      = ["1H", "30M", "15M"]   # timeframes for liquidity draw scan (Step 2)
 ENTRY_TF    = ["5M", "1M"]           # timeframes for FVG/iFVG (highest TF first)
@@ -124,17 +135,23 @@ class CandleStore:
     def __init__(self):
         self._data: dict[tuple[str, str], deque[Candle]] = {}
 
+    def _maxlen(self, timeframe: str) -> int:
+        return MAX_CANDLES_PER_TF.get(timeframe.upper(), MAX_CANDLES)
+
     def push(self, candle: Candle) -> None:
         key = (candle.symbol.upper(), candle.timeframe.upper())
         if key not in self._data:
-            self._data[key] = deque(maxlen=MAX_CANDLES)
+            maxlen = self._maxlen(candle.timeframe)
+            self._data[key] = deque(maxlen=maxlen)
         self._data[key].append(candle)
 
-    def get(self, symbol: str, timeframe: str, n: int = MAX_CANDLES) -> list[Candle]:
+    def get(self, symbol: str, timeframe: str, n: int = 0) -> list[Candle]:
         key = (symbol.upper(), timeframe.upper())
         buf = self._data.get(key, deque())
         candles = list(buf)
-        return candles[-n:] if n else candles
+        if n:
+            return candles[-n:]
+        return candles
 
     def has(self, symbol: str, timeframe: str, minimum: int = 3) -> bool:
         return len(self.get(symbol, timeframe)) >= minimum
@@ -382,7 +399,7 @@ def determine_bias(symbol: str) -> tuple[Bias, str]:
     details_parts: list[str] = []
 
     for tf in BIAS_TF:
-        candles = CANDLE_STORE.get(symbol, tf, n=40)
+        candles = CANDLE_STORE.get(symbol, tf)
         if len(candles) < 6:
             details_parts.append(f"{tf}: insufficient data ({len(candles)} candles)")
             continue
@@ -489,7 +506,7 @@ def find_liquidity_draw(symbol: str, bias: Bias) -> Optional[LiquidityLevel]:
         return None
 
     for tf in LIQ_TF:
-        candles = CANDLE_STORE.get(symbol, tf, n=60)
+        candles = CANDLE_STORE.get(symbol, tf)
         if len(candles) < 6:
             continue
 
@@ -567,7 +584,7 @@ def find_entry_fvg(symbol: str, bias: Bias) -> Optional[FVG]:
     one_min_ifvg: Optional[FVG]  = None
 
     for tf in ENTRY_TF:
-        candles = CANDLE_STORE.get(symbol, tf, n=50)
+        candles = CANDLE_STORE.get(symbol, tf)
         if len(candles) < 3:
             continue
 
@@ -584,7 +601,7 @@ def find_entry_fvg(symbol: str, bias: Bias) -> Optional[FVG]:
         return five_min_ifvg
 
     if one_min_ifvg:
-        candles_5m = CANDLE_STORE.get(symbol, "5M", n=50)
+        candles_5m = CANDLE_STORE.get(symbol, "5M")
         if len(candles_5m) >= 3:
             fvgs_5m = _detect_fvgs(candles_5m, bias)
             five_m_inversed = any(
